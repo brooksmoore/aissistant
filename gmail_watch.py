@@ -1,0 +1,156 @@
+"""Gmail inbox watcher (personal inbox only, read-only). Polls for new unread
+mail, triages it with a cheap model, and pings her only for things that matter."""
+import base64
+import json
+import logging
+import re
+
+import brain
+import gcal
+import memory
+from config import CLASSIFIER_MODEL, GOOGLE_TOKEN
+
+log = logging.getLogger("penny.gmail")
+
+_service = None
+
+
+def enabled() -> bool:
+    return GOOGLE_TOKEN.exists()
+
+
+def _svc():
+    global _service
+    if _service is None:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+
+        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN), gcal.SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            GOOGLE_TOKEN.write_text(creds.to_json())
+        _service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return _service
+
+
+def _header(msg, name):
+    for h in msg.get("payload", {}).get("headers", []):
+        if h["name"].lower() == name.lower():
+            return h["value"]
+    return ""
+
+
+def fetch_new() -> list:
+    """New unseen unread messages from the primary inbox: [{id, sender, subject, snippet}]."""
+    try:
+        resp = _svc().users().messages().list(
+            userId="me", q="in:inbox is:unread category:primary newer_than:2d", maxResults=25
+        ).execute()
+    except Exception:
+        log.exception("gmail list failed")
+        return []
+    out = []
+    for ref in resp.get("messages", []):
+        if memory.email_seen(ref["id"]):
+            continue
+        try:
+            msg = _svc().users().messages().get(
+                userId="me", id=ref["id"], format="metadata",
+                metadataHeaders=["From", "Subject"],
+            ).execute()
+        except Exception:
+            continue
+        out.append({
+            "id": ref["id"],
+            "sender": _header(msg, "From"),
+            "subject": _header(msg, "Subject"),
+            "snippet": msg.get("snippet", "")[:300],
+        })
+    return out
+
+
+TRIAGE_PROMPT = """You triage a personal (non-work) email inbox for a busy woman with anxiety. \
+For each email below, classify it:
+
+- "urgent": time-sensitive and personally important (appointment change, payment problem, someone needs an answer today)
+- "needs_reply": a real person is waiting on a response from her
+- "delivery": package/order/shipping updates (Amazon etc.)
+- "fyi": mildly useful info, no action
+- "ignore": marketing, newsletters, promos, notifications nobody reads
+
+Reply with ONLY a JSON array like:
+[{"id": "...", "kind": "urgent|needs_reply|delivery|fyi|ignore", "summary": "one short human sentence"}]
+
+Emails:
+"""
+
+
+def triage(emails: list) -> list:
+    if not emails:
+        return []
+    listing = "\n".join(
+        f"- id: {e['id']}\n  from: {e['sender']}\n  subject: {e['subject']}\n  preview: {e['snippet']}"
+        for e in emails
+    )
+    try:
+        raw = brain.quick(TRIAGE_PROMPT + listing, model=CLASSIFIER_MODEL, max_tokens=1500)
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        results = json.loads(match.group(0)) if match else []
+    except Exception:
+        log.exception("triage failed")
+        results = []
+    by_id = {e["id"]: e for e in emails}
+    out = []
+    for r in results:
+        e = by_id.get(r.get("id"))
+        if e:
+            out.append({**e, "kind": r.get("kind", "fyi"), "summary": r.get("summary", e["subject"])})
+    # anything the model dropped: mark fyi so we don't reprocess forever
+    triaged_ids = {r.get("id") for r in results}
+    for e in emails:
+        if e["id"] not in triaged_ids:
+            out.append({**e, "kind": "fyi", "summary": e["subject"]})
+    return out
+
+
+async def poll(context):
+    """Job: every N minutes, surface only what matters."""
+    if not enabled():
+        return
+    chat_id = memory.get_setting("owner_chat_id")
+    if not chat_id:
+        return
+    emails = fetch_new()
+    if not emails:
+        return
+    triaged = triage(emails)
+    pings, deliveries = [], []
+    for e in triaged:
+        memory.mark_email(e["id"], e["sender"], e["subject"], e["summary"], e["kind"])
+        if e["kind"] in ("urgent", "needs_reply"):
+            pings.append(e)
+        elif e["kind"] == "delivery":
+            deliveries.append(e)
+    from scheduler import _quiet, item_buttons
+    from datetime import datetime
+    from config import TZ
+    if _quiet(datetime.now(TZ)):
+        return  # they stay marked; she'll see anything still unread in her inbox
+    for e in pings:
+        icon = "🚨" if e["kind"] == "urgent" else "💬"
+        sender = re.sub(r"\s*<.*>", "", e["sender"]).strip()
+        item_id = memory.add_item(
+            title=f"Reply to {sender}: {e['subject'][:60]}",
+            details=e["summary"],
+            category="message",
+            priority=4 if e["kind"] == "urgent" else 3,
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{icon} Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied.",
+            reply_markup=item_buttons(item_id),
+        )
+    if deliveries:
+        lines = [f"  📦 {e['summary']}" for e in deliveries[:5]]
+        await context.bot.send_message(chat_id=chat_id, text="Package update:\n" + "\n".join(lines))

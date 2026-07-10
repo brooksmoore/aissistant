@@ -1,0 +1,14 @@
+# user data + secrets: NEVER in git — each instance is private to its human
+instances/
+*.db
+*.log
+google_credentials.json
+google_token.json
+.env
+
+# machine junk
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+voice_*.oga
