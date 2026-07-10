@@ -1,4 +1,19 @@
-# Penny — her personal assistant 💛
+# aissistant — shippable personal AI assistants
+
+One codebase, many independent assistants. Each **instance** (e.g. `penny`, `jarvis`) has its
+own Telegram bot, Anthropic API key, database/memories, Google account, backups, and log under
+`instances/<name>/` — completely separate brains that all improve together when the code improves.
+
+**Add a new instance in ~5 minutes:** create a bot via @BotFather + a fresh Anthropic key, fill
+them into `instances/<name>/.env` (copy `.env.example`), then `bash install_autostart.sh <name>`
+and text the bot your pairing code. Google (calendar/inbox) per instance:
+`AISSISTANT_INSTANCE=<name> ./venv/bin/python setup_google.py` (README step 6 for the one-time
+Google Cloud part, done in THAT person's Google account). Owner report per instance:
+`AISSISTANT_INSTANCE=<name> ./venv/bin/python report.py 7`. Tests: `bash run_tests.sh [--live]`.
+
+---
+
+# Penny — the original instance 💛
 
 A Telegram bot with a Claude brain that lives on Brooks's Mac. It captures everything she
 says (via iPhone mic dictation), holds a prioritized master list with satisfying ✓ check-off
