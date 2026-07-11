@@ -3,18 +3,24 @@ Everything she says flows through respond(); Claude decides what to capture,
 remind, remember, and put on the calendar."""
 import json
 import logging
+import threading
 from datetime import datetime
 
 import anthropic
 
 import gcal
 import memory
+import scheduler
 from config import (
     ANTHROPIC_API_KEY,
     ASSISTANT_NAME,
     BRAIN_MODEL,
     CLASSIFIER_MODEL,
     DAILY_BUDGET_USD,
+    EVENING_DIGEST,
+    MORNING_DIGEST,
+    QUIET_END_HOUR,
+    QUIET_START_HOUR,
     SMART_ROUTING,
     TIMEZONE,
     TZ,
@@ -22,6 +28,7 @@ from config import (
 
 log = logging.getLogger("penny.brain")
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_spend_lock = threading.Lock()  # respond() runs in worker threads while jobs call quick()
 
 # ---------- cost metering (estimates, $/token) ----------
 # (input, output, cache_write, cache_read) per token
@@ -45,8 +52,9 @@ def _track_usage(model: str, usage) -> float:
         + (getattr(usage, "cache_read_input_tokens", 0) or 0) * p_cr
     )
     key = "spend_" + datetime.now(TZ).date().isoformat()
-    total = float(memory.get_setting(key) or 0) + cost
-    memory.set_setting(key, f"{total:.6f}")
+    with _spend_lock:
+        total = float(memory.get_setting(key) or 0) + cost
+        memory.set_setting(key, f"{total:.6f}")
     return total
 
 
@@ -348,13 +356,14 @@ def _state_block() -> str:
     else:
         items_txt = "(list is empty)"
     cal_txt = gcal.upcoming_text() if gcal.enabled() else "(calendar not connected yet)"
-    import scheduler
     prefs_txt = (
         f"emoji_level={scheduler.pref('emoji_level', 'minimal')}, "
         f"reply_length={scheduler.pref('reply_length', 'short')}, "
         f"reminder_style={scheduler.pref('reminder_style', 'normal')}, "
-        f"quiet={scheduler.pref('quiet_start_hour', 22)}:00-{scheduler.pref('quiet_end_hour', 8)}:00, "
-        f"digests {scheduler.pref('morning_digest_time', '08:00')} & {scheduler.pref('evening_digest_time', '20:30')}, "
+        # defaults must mirror what the scheduler actually uses (.env-overridable),
+        # or the model confidently states wrong quiet hours / digest times
+        f"quiet={scheduler.pref('quiet_start_hour', QUIET_START_HOUR)}:00-{scheduler.pref('quiet_end_hour', QUIET_END_HOUR)}:00, "
+        f"digests {scheduler.pref('morning_digest_time', MORNING_DIGEST)} & {scheduler.pref('evening_digest_time', EVENING_DIGEST)}, "
         f"nag cadence P5/P4/P3 = {scheduler.escalation_minutes(5)}/{scheduler.escalation_minutes(4)}/{scheduler.escalation_minutes(3)} min, "
         f"max {scheduler.max_nags()} nags per item"
     )
@@ -411,19 +420,23 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 
     model = pick_model(user_text, has_image=bool(image_b64))
     tools = _tools()
-    # Second cache breakpoint on the newest history message: during a conversation
-    # burst, the whole growing chat prefix is read from cache instead of re-billed.
+    # Second cache breakpoint on the newest history message. The state block sits
+    # between the cached personality and the messages, so this entry only survives
+    # within one turn — which is exactly where it pays: a multi-tool brain-dump
+    # re-reads the whole prefix once per tool round-trip. Default 5m TTL (a 1h TTL
+    # here just doubles the write premium on an entry the next turn invalidates).
     if len(messages) > 1 and isinstance(messages[-1]["content"], str):
         messages[-1]["content"] = [
-            {"type": "text", "text": messages[-1]["content"], "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            {"type": "text", "text": messages[-1]["content"], "cache_control": {"type": "ephemeral"}}
         ]
     # The personality (+ tools) prefix is identical every turn -> prompt-cached (~90% off
-    # input cost on hits). Only the small state block below it changes.
-    def _system():
-        return [
-            {"type": "text", "text": PERSONALITY, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-            {"type": "text", "text": _state_block()},
-        ]
+    # input cost on hits). The state block is computed ONCE per turn: recomputing it
+    # inside the tool loop changed the prompt prefix every iteration (minute timestamp,
+    # freshly captured items) and busted the intra-turn cache on every round-trip.
+    system = [
+        {"type": "text", "text": PERSONALITY, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        {"type": "text", "text": _state_block()},
+    ]
 
     captured = []   # item titles saved this turn, for the fallback confirmation
     did = []        # plain-English record of every successful non-capture action
@@ -432,7 +445,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             resp = client.messages.create(
                 model=model,
                 max_tokens=4096,  # a big brain-dump can mean 10+ tool calls in one response
-                system=_system(),
+                system=system,
                 tools=tools,
                 messages=messages,
                 extra_headers={"anthropic-beta": "extended-cache-ttl-2025-04-11"},
@@ -441,13 +454,11 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             # If the extended-TTL beta is ever retired, strip ttl hints and continue
             # on the standard 5-minute cache rather than failing her message.
             log.warning("extended cache TTL rejected; retrying with default cache")
-            def _strip(blocks):
-                for b in blocks:
-                    if isinstance(b, dict) and b.get("cache_control", {}).get("ttl"):
-                        b["cache_control"] = {"type": "ephemeral"}
-                return blocks
+            for b in system:
+                if isinstance(b, dict) and b.get("cache_control", {}).get("ttl"):
+                    b["cache_control"] = {"type": "ephemeral"}
             resp = client.messages.create(
-                model=model, max_tokens=4096, system=_strip(_system()),
+                model=model, max_tokens=4096, system=system,
                 tools=tools, messages=messages,
             )
         spent = _track_usage(model, resp.usage)

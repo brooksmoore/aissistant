@@ -4,7 +4,7 @@ import asyncio
 import base64
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import Update
 from telegram.ext import (
@@ -23,6 +23,7 @@ import memory
 import scheduler
 import voice
 from config import (
+    INSTANCE,
     INSTANCE_DIR,
     ASSISTANT_NAME,
     DAILY_BUDGET_USD,
@@ -134,7 +135,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.info("paired with chat %s", chat_id)
             await update.message.reply_text(WELCOME, parse_mode="Markdown")
         else:
-            await update.message.reply_text("What's the magic word? 🔒")
+            # cap wrong guesses: an unpaired bot must not be a brute-forceable
+            # oracle for whoever finds it first on Telegram
+            fails = int(memory.get_setting("pair_failures") or 0) + 1
+            memory.set_setting("pair_failures", fails)
+            if fails <= 20:
+                await update.message.reply_text("What's the magic word? 🔒")
+            elif fails == 21:
+                log.warning("pairing locked after 21 wrong guesses; delete the pair_failures setting to retry")
         return
     if chat_id != _owner():
         return  # silently ignore strangers
@@ -212,7 +220,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "done" and len(parts) == 2:
         item = memory.get_item(int(parts[1]))
-        if item:
+        # only complete OPEN items: a second ✅ tap (each nag message carries one)
+        # must not re-complete — a recurring item would spawn a duplicate occurrence
+        if item and item["status"] == "open":
             memory.complete_item(item["id"])
             await q.answer("Checked off! ✅")
             remaining = memory.open_items()
@@ -227,13 +237,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await q.answer("Already gone!")
     elif action == "snooze" and len(parts) == 3:
-        from datetime import timedelta
         nxt = (datetime.now(TZ) + timedelta(minutes=int(parts[2]))).isoformat(timespec="seconds")
         memory.update_item(int(parts[1]), next_remind_at=nxt)
         await q.answer("Snoozed ⏰")
         await q.edit_message_text(f"{q.message.text}\n\n⏰ Snoozed — I'll circle back in an hour.")
     elif action == "tmrw" and len(parts) == 2:
-        from datetime import timedelta
         tomorrow9 = datetime.now(TZ).replace(hour=9, minute=0, second=0) + timedelta(days=1)
         memory.update_item(int(parts[1]), next_remind_at=tomorrow9.isoformat(timespec="seconds"))
         await q.answer("Moved to tomorrow 🌙")
@@ -244,7 +252,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not TELEGRAM_TOKEN:
-        raise SystemExit("TELEGRAM_TOKEN is missing — copy .env.example to .env and fill it in (see README.md).")
+        raise SystemExit(
+            f"TELEGRAM_TOKEN is missing — fill it in at instances/{INSTANCE}/.env "
+            f"(copy .env.example there if it doesn't exist; see README.md)."
+        )
     memory.init()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 

@@ -1,6 +1,7 @@
 """Housekeeping that runs itself: nightly DB backup, and one weekly job that
 surfaces stale items for a guilt-free prune and quietly tidies up her facts.
 Everything here is free except the weekly fact pass (one cheap Haiku call)."""
+import asyncio
 import glob
 import json
 import logging
@@ -10,7 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 import memory
-from config import CLASSIFIER_MODEL, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
+from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
 
 log = logging.getLogger("penny.maintenance")
 
@@ -76,7 +77,7 @@ def prune():
 
 async def backup_tick(context):
     """Runs hourly; backup_db() no-ops after the first successful run each day."""
-    backup_db()
+    await asyncio.to_thread(backup_db)  # disk I/O off the event loop
 
 
 # ---------- weekly fact tidy-up ----------
@@ -102,6 +103,9 @@ Reply with ONLY a JSON array, nothing else:
 def fact_maintenance():
     import brain  # deferred: brain imports memory, avoid an import cycle at module load
 
+    if brain.today_spend() >= 3 * DAILY_BUDGET_USD:
+        log.warning("skipping fact maintenance: daily hard cap already reached")
+        return
     facts = memory.all_facts()
     if not facts:
         return
@@ -116,11 +120,14 @@ def fact_maintenance():
         return
     if not cleaned:
         return
-    # never let a parsing hiccup or an overzealous model silently wipe her memory
-    if len(cleaned) < max(1, len(facts) // 2):
-        log.warning("fact maintenance produced %d facts from %d — skipping, looks unsafe", len(cleaned), len(facts))
+    rows = [(c.get("content", "").strip(), c.get("category", "general"))
+            for c in cleaned if isinstance(c, dict) and c.get("content", "").strip()]
+    # never let a parsing hiccup or an overzealous model silently wipe her memory —
+    # guard on the rows actually written, not the raw JSON entry count (blank-content
+    # entries used to pass the count check and then get filtered out)
+    if len(rows) < max(1, len(facts) // 2):
+        log.warning("fact maintenance produced %d usable facts from %d — skipping, looks unsafe", len(rows), len(facts))
         return
-    rows = [(c.get("content", "").strip(), c.get("category", "general")) for c in cleaned if c.get("content", "").strip()]
     memory.replace_facts(rows)
     log.info("fact maintenance: %d -> %d facts", len(facts), len(rows))
 
@@ -163,6 +170,6 @@ async def weekly_tick(context):
             log.exception("stale-item digest failed to send")
 
     try:
-        fact_maintenance()
+        await asyncio.to_thread(fact_maintenance)  # Claude call off the event loop
     except Exception:
         log.exception("weekly fact maintenance failed")

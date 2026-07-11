@@ -89,6 +89,27 @@ class TestRecurrenceTiming(unittest.TestCase):
         remind = memory.parse_dt(nxt["next_remind_at"])
         self.assertEqual(due - remind, timedelta(days=2, hours=8))
 
+    def test_lead_time_survives_nag_drift(self):
+        """Nags overwrite next_remind_at; the respawned occurrence must still use
+        the ORIGINAL lead, not the drifted (possibly past-due or NULL) nag time."""
+        i = memory.add_item("Pay rent", due_at="2026-08-10T17:00:00",
+                            remind_at="2026-08-08T09:00:00", recurrence="monthly")
+        # simulate the nag engine pushing the reminder past the due date
+        memory.update_item(i, next_remind_at="2026-08-10T18:00:00", remind_count=3)
+        memory.complete_item(i)
+        nxt = memory.open_items()[0]
+        due = memory.parse_dt(nxt["due_at"])
+        remind = memory.parse_dt(nxt["next_remind_at"])
+        self.assertEqual(due - remind, timedelta(days=2, hours=8))
+
+    def test_double_complete_spawns_only_one_occurrence(self):
+        """Two ✅ taps on the same recurring item (each nag message has a button)
+        must not create duplicate next occurrences."""
+        i = memory.add_item("Pay rent", due_at="2026-08-01T09:00:00", recurrence="monthly")
+        memory.complete_item(i)
+        memory.complete_item(i)  # second tap
+        self.assertEqual(len(memory.open_items()), 1)
+
 
 class TestReminderTiming(unittest.TestCase):
     """The nag engine: escalation, quiet hours, due detection."""
@@ -174,6 +195,8 @@ class TestCostControls(unittest.TestCase):
         import brain
         self.brain = brain
 
+    @unittest.skipUnless((config.INSTANCE_DIR / ".env").exists(),
+                         "deployment invariant — only meaningful with an instance .env present")
     def test_v1_is_haiku_everywhere(self):
         self.assertIn("haiku", config.BRAIN_MODEL)  # v1 scope: Haiku-only
 

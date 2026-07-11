@@ -18,18 +18,24 @@ def enabled() -> bool:
     return GOOGLE_TOKEN.exists()
 
 
+def service(api: str, version: str):
+    """Shared Google auth: load, refresh, and persist the instance token, then
+    build a client. Calendar and Gmail both go through here so auth fixes land once."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+
+    creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN), SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        GOOGLE_TOKEN.write_text(creds.to_json())
+    return build(api, version, credentials=creds, cache_discovery=False)
+
+
 def _svc():
     global _service
     if _service is None:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
-        from googleapiclient.discovery import build
-
-        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN), SCOPES)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            GOOGLE_TOKEN.write_text(creds.to_json())
-        _service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        _service = service("calendar", "v3")
     return _service
 
 
@@ -81,13 +87,15 @@ def _upcoming_text_fresh(days=7) -> str:
     return "\n".join(lines)
 
 
+def _local(iso: str) -> datetime:
+    """Parse ISO; naive values are the owner's local time."""
+    dt = datetime.fromisoformat(iso)
+    return dt if dt.tzinfo else dt.replace(tzinfo=TZ)
+
+
 def create_event(title, start_iso, end_iso=None, notes="") -> str:
-    start = datetime.fromisoformat(start_iso)
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=TZ)
-    end = datetime.fromisoformat(end_iso) if end_iso else start + timedelta(hours=1)
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=TZ)
+    start = _local(start_iso)
+    end = _local(end_iso) if end_iso else start + timedelta(hours=1)
     body = {
         "summary": title,
         "description": notes,
@@ -107,16 +115,12 @@ def update_event(event_id, title=None, start_iso=None, end_iso=None, notes=None)
     if notes is not None:
         e["description"] = notes
     if start_iso:
-        start = datetime.fromisoformat(start_iso)
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=TZ)
+        start = _local(start_iso)
         e["start"] = {"dateTime": start.isoformat(), "timeZone": TIMEZONE}
         if not end_iso:
             end_iso = (start + timedelta(hours=1)).isoformat()
     if end_iso:
-        end = datetime.fromisoformat(end_iso)
-        if end.tzinfo is None:
-            end = end.replace(tzinfo=TZ)
+        end = _local(end_iso)
         e["end"] = {"dateTime": end.isoformat(), "timeZone": TIMEZONE}
     svc.events().update(calendarId="primary", eventId=event_id, body=e).execute()
     _cal_cache["ts"] = 0.0

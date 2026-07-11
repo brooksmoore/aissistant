@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS items (
     completed_at TEXT,
     next_remind_at TEXT,
     remind_count INTEGER DEFAULT 0,
-    recurrence TEXT
+    recurrence TEXT,
+    remind_lead_seconds INTEGER
 );
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,18 +50,23 @@ CREATE TABLE IF NOT EXISTS seen_emails (
 
 
 def _c() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH)
+    # generous timeout: writes come from both the bot's worker threads and the
+    # scheduler's jobs; without it a slow backup can surface "database is locked"
+    con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
     return con
 
 
 def init():
     with _c() as con:
+        con.execute("PRAGMA journal_mode=WAL")  # readers never block the writer
         con.executescript(SCHEMA)
-        # migration for dbs created before recurrence existed
+        # migrations for dbs created before these columns existed
         cols = {r["name"] for r in con.execute("PRAGMA table_info(items)")}
         if "recurrence" not in cols:
             con.execute("ALTER TABLE items ADD COLUMN recurrence TEXT")
+        if "remind_lead_seconds" not in cols:
+            con.execute("ALTER TABLE items ADD COLUMN remind_lead_seconds INTEGER")
 
 
 def now_iso() -> str:
@@ -85,11 +91,18 @@ def parse_dt(s: Optional[str]) -> Optional[datetime]:
 def add_item(title, details="", category="task", priority=3, due_at=None, remind_at=None, recurrence=None) -> int:
     if due_at and not remind_at:
         remind_at = due_at
+    # remember the ORIGINAL due->reminder lead: nags overwrite next_remind_at,
+    # so a recurring item's respawn must not derive its lead from the drifted value
+    lead = None
+    if due_at and remind_at:
+        d, r = parse_dt(due_at), parse_dt(remind_at)
+        if d and r:
+            lead = max(0, int((d - r).total_seconds()))
     with _c() as con:
         cur = con.execute(
-            "INSERT INTO items (title, details, category, priority, due_at, created_at, next_remind_at, recurrence)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (title, details, category, int(priority), due_at, now_iso(), remind_at, recurrence),
+            "INSERT INTO items (title, details, category, priority, due_at, created_at, next_remind_at, recurrence, remind_lead_seconds)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (title, details, category, int(priority), due_at, now_iso(), remind_at, recurrence, lead),
         )
         return cur.lastrowid
 
@@ -128,19 +141,23 @@ def update_item(item_id, **fields):
 
 def complete_item(item_id):
     """Marks an item done. If it's recurring, immediately spawns the next
-    occurrence (same offset between due date and reminder, rolled forward)."""
+    occurrence (same lead between due date and reminder, rolled forward)."""
     item = get_item(item_id)
+    if not item or item["status"] != "open":
+        return  # already done/dropped — a second ✅ tap must not double-spawn a recurrence
     with _c() as con:
         con.execute(
             "UPDATE items SET status='done', completed_at=?, next_remind_at=NULL WHERE id=?",
             (now_iso(), item_id),
         )
-    if item and item["recurrence"] and item["due_at"]:
+    if item["recurrence"] and item["due_at"]:
         due = parse_dt(item["due_at"])
-        remind = parse_dt(item["next_remind_at"])
-        offset = (due - remind) if remind else None
+        lead = item["remind_lead_seconds"]
+        if lead is None:  # pre-migration row: fall back to the live reminder, if sane
+            remind = parse_dt(item["next_remind_at"])
+            lead = int((due - remind).total_seconds()) if remind and remind <= due else 0
         new_due = _advance_date(due, item["recurrence"])
-        new_remind = (new_due - offset) if offset else new_due
+        new_remind = new_due - timedelta(seconds=lead)
         add_item(
             title=item["title"],
             details=item["details"],

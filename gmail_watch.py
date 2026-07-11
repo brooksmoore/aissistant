@@ -1,14 +1,16 @@
 """Gmail inbox watcher (personal inbox only, read-only). Polls for new unread
 mail, triages it with a cheap model, and pings her only for things that matter."""
-import base64
+import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 
 import brain
 import gcal
 import memory
-from config import CLASSIFIER_MODEL, GOOGLE_TOKEN
+from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, GOOGLE_TOKEN, TZ
+from scheduler import _quiet, item_buttons
 
 log = logging.getLogger("penny.gmail")
 
@@ -22,15 +24,7 @@ def enabled() -> bool:
 def _svc():
     global _service
     if _service is None:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
-        from googleapiclient.discovery import build
-
-        creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN), gcal.SCOPES)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            GOOGLE_TOKEN.write_text(creds.to_json())
-        _service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        _service = gcal.service("gmail", "v1")
     return _service
 
 
@@ -121,10 +115,16 @@ async def poll(context):
     chat_id = memory.get_setting("owner_chat_id")
     if not chat_id:
         return
-    emails = fetch_new()
+    if brain.today_spend() >= 3 * DAILY_BUDGET_USD:
+        # hard cap tripped: skip entirely (nothing fetched or marked, so today's
+        # mail is simply triaged on a later poll instead of spending past the cap)
+        return
+    # network + Claude calls off the event loop: a big fetch must not freeze the bot
+    emails = await asyncio.to_thread(fetch_new)
     if not emails:
         return
-    triaged = triage(emails)
+    triaged = await asyncio.to_thread(triage, emails)
+    quiet = _quiet(datetime.now(TZ))
     pings, deliveries = [], []
     for e in triaged:
         memory.mark_email(e["id"], e["sender"], e["subject"], e["summary"], e["kind"])
@@ -132,25 +132,25 @@ async def poll(context):
             pings.append(e)
         elif e["kind"] == "delivery":
             deliveries.append(e)
-    from scheduler import _quiet, item_buttons
-    from datetime import datetime
-    from config import TZ
-    if _quiet(datetime.now(TZ)):
-        return  # they stay marked; she'll see anything still unread in her inbox
     for e in pings:
         icon = "🚨" if e["kind"] == "urgent" else "💬"
         sender = re.sub(r"\s*<.*>", "", e["sender"]).strip()
+        # during quiet hours, don't ping now — but the item still goes on the list
+        # with a due reminder, so check_reminders surfaces it right after quiet ends
+        # (previously these were marked seen and silently lost forever)
         item_id = memory.add_item(
             title=f"Reply to {sender}: {e['subject'][:60]}",
             details=e["summary"],
             category="message",
             priority=4 if e["kind"] == "urgent" else 3,
+            remind_at=memory.now_iso() if quiet else None,
         )
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"{icon} Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied.",
-            reply_markup=item_buttons(item_id),
-        )
-    if deliveries:
+        if not quiet:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{icon} Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied.",
+                reply_markup=item_buttons(item_id),
+            )
+    if deliveries and not quiet:
         lines = [f"  📦 {e['summary']}" for e in deliveries[:5]]
         await context.bot.send_message(chat_id=chat_id, text="Package update:\n" + "\n".join(lines))

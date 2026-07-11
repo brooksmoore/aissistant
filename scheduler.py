@@ -1,5 +1,6 @@
 """Reminder engine + daily digests. Reminders escalate by priority and keep
 nagging (gently) until she taps ✓ Done. Quiet hours are respected except P5."""
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -142,12 +143,17 @@ async def digest_tick(context):
         sched = now.replace(hour=h, minute=m, second=0, microsecond=0)
         if memory.get_setting(f"{name}_digest_sent") == today or now < sched:
             continue
-        memory.set_setting(f"{name}_digest_sent", today)
-        if now <= sched + timedelta(hours=2):
-            try:
-                await fn(context)
-            except Exception:
-                log.exception("%s digest failed", name)
+        if now > sched + timedelta(hours=2):
+            # missed the whole grace window (Mac asleep) — skip today, don't fire at odd hours
+            memory.set_setting(f"{name}_digest_sent", today)
+            continue
+        try:
+            await fn(context)
+            # mark sent only AFTER success: a transient Telegram/network failure
+            # retries on the next minute tick instead of losing the day's digest
+            memory.set_setting(f"{name}_digest_sent", today)
+        except Exception:
+            log.exception("%s digest failed (will retry within the grace window)", name)
 
 
 async def morning_digest(context):
@@ -159,7 +165,8 @@ async def morning_digest(context):
     parts = [f"☀️ Morning! It's {now.strftime('%A, %B %-d')}."]
 
     if gcal.enabled():
-        today = [e for e in gcal.upcoming_events(1)]
+        # Google HTTP call off the event loop — a slow API must not freeze the bot
+        today = await asyncio.to_thread(gcal.upcoming_events, 1)
         if today:
             parts.append("\nToday:")
             for e in today:

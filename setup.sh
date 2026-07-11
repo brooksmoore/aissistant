@@ -10,12 +10,16 @@ $PY -m venv venv
 ./venv/bin/pip install --upgrade pip -q
 ./venv/bin/pip install -r requirements.txt -q
 
-if [ ! -f .env ]; then
-  cp .env.example .env
+# each install lives under instances/<name>/ — that .env is the ONLY one loaded
+INSTANCE="${1:-penny}"
+ENV_FILE="instances/$INSTANCE/.env"
+mkdir -p "instances/$INSTANCE"
+if [ ! -f "$ENV_FILE" ]; then
+  cp .env.example "$ENV_FILE"
   echo ""
-  echo "✅ Installed. NEXT: open the .env file in this folder and fill in"
+  echo "✅ Installed. NEXT: open $ENV_FILE and fill in"
   echo "   TELEGRAM_TOKEN and ANTHROPIC_API_KEY (README.md steps 2-3),"
-  echo "   then start the bot with:  bash run.sh"
+  echo "   then start the bot with:  bash run.sh $INSTANCE"
 else
-  echo "✅ Installed. Start the bot with:  bash run.sh"
+  echo "✅ Installed. Start the bot with:  bash run.sh $INSTANCE"
 fi
