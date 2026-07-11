@@ -89,6 +89,10 @@ def parse_dt(s: Optional[str]) -> Optional[datetime]:
 # ---------- items ----------
 
 def add_item(title, details="", category="task", priority=3, due_at=None, remind_at=None, recurrence=None) -> int:
+    if recurrence and recurrence not in RECURRENCE_UNITS:
+        # an unrecognized unit must fail loudly, not silently store a value
+        # _advance_date can't roll forward (which used to freeze due_at forever)
+        raise ValueError(f"unsupported recurrence {recurrence!r} — must be one of {RECURRENCE_UNITS}")
     if due_at and not remind_at:
         remind_at = due_at
     # remember the ORIGINAL due->reminder lead: nags overwrite next_remind_at,
@@ -107,9 +111,14 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
         return cur.lastrowid
 
 
+RECURRENCE_UNITS = ("daily", "weekly", "monthly", "yearly")
+
+
 def _advance_date(dt: datetime, unit: str) -> datetime:
     """Rolls a datetime forward one recurrence cycle, keeping time-of-day and
     clamping to the last valid day of the target month (e.g. Jan 31 -> Feb 28)."""
+    if unit == "daily":
+        return dt + timedelta(days=1)
     if unit == "weekly":
         return dt + timedelta(weeks=1)
     if unit == "monthly":
@@ -134,6 +143,8 @@ def update_item(item_id, **fields):
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
         return
+    if fields.get("recurrence") and fields["recurrence"] not in RECURRENCE_UNITS:
+        raise ValueError(f"unsupported recurrence {fields['recurrence']!r} — must be one of {RECURRENCE_UNITS}")
     sets = ", ".join(f"{k}=?" for k in fields)
     with _c() as con:
         con.execute(f"UPDATE items SET {sets} WHERE id=?", (*fields.values(), item_id))

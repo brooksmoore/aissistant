@@ -72,6 +72,24 @@ class TestRecurrenceTiming(unittest.TestCase):
         self.assertTrue(open_now[0]["due_at"].startswith("2026-09-01"))
         self.assertEqual(open_now[0]["recurrence"], "monthly")
 
+    def test_daily_rolls_and_respawns_on_completion(self):
+        i = memory.add_item("Do pushups", due_at="2026-08-01T10:00:00", recurrence="daily")
+        memory.complete_item(i)
+        open_now = memory.open_items()
+        self.assertEqual(len(open_now), 1)
+        self.assertTrue(open_now[0]["due_at"].startswith("2026-08-02"))
+        self.assertEqual(open_now[0]["recurrence"], "daily")
+
+    def test_unsupported_recurrence_is_rejected(self):
+        """A value outside RECURRENCE_UNITS must fail loudly (ValueError) rather than
+        silently store — _advance_date's unmatched-unit fallback used to freeze due_at
+        forever, respawning an already-overdue item on every completion."""
+        with self.assertRaises(ValueError):
+            memory.add_item("x", due_at="2026-08-01T09:00:00", recurrence="hourly")
+        i = memory.add_item("x", due_at="2026-08-01T09:00:00")
+        with self.assertRaises(ValueError):
+            memory.update_item(i, recurrence="hourly")
+
     def test_monthly_clamps_short_months(self):
         d = memory._advance_date(datetime(2026, 1, 31, 9, 0, tzinfo=config.TZ), "monthly")
         self.assertEqual((d.month, d.day), (2, 28))

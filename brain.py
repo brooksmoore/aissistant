@@ -141,8 +141,8 @@ def _tools() -> list:
                     "remind_at": {"type": "string", "description": "ISO local datetime for the first reminder ping. Omit for no ping (it still shows in daily digests)."},
                     "recurrence": {
                         "type": "string",
-                        "enum": ["weekly", "monthly", "yearly"],
-                        "description": "Set only if she describes something that repeats on its own cycle (rent on the 1st = monthly, car registration every July = yearly, trash night = weekly). Requires due_at. When she checks it off, the next occurrence is created automatically.",
+                        "enum": ["daily", "weekly", "monthly", "yearly"],
+                        "description": "Set only if she describes something that repeats on its own cycle (a daily habit = daily, rent on the 1st = monthly, car registration every July = yearly, trash night = weekly). Requires due_at. When she checks it off, the next occurrence is created automatically.",
                     },
                 },
                 "required": ["title", "category", "priority"],
@@ -172,7 +172,7 @@ def _tools() -> list:
                     "status": {"type": "string", "enum": ["open", "dropped"]},
                     "recurrence": {
                         "type": "string",
-                        "enum": ["none", "weekly", "monthly", "yearly"],
+                        "enum": ["none", "daily", "weekly", "monthly", "yearly"],
                         "description": "Set to start/change a repeat cycle, or 'none' to stop it repeating.",
                     },
                 },
