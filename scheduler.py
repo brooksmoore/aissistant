@@ -135,6 +135,8 @@ async def digest_tick(context):
         ("morning", MORNING_DIGEST, morning_digest),
         ("evening", EVENING_DIGEST, evening_digest),
     ):
+        if pref(f"{name}_digest_enabled", "yes") == "no":
+            continue
         t = pref(f"{name}_digest_time", default)
         try:
             h, m = (int(x) for x in t.split(":"))

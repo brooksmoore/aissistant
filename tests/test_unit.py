@@ -166,6 +166,34 @@ class TestReminderTiming(unittest.TestCase):
         memory.set_setting("pref_quiet_start_hour", "21")  # her actual request once
         self.assertTrue(s._quiet(mk(21)))
 
+    def test_disabled_digest_never_fires(self):
+        """set_preference has no way to turn a digest off entirely, an owner asks
+        for it, gets told 'done' with nothing behind it, and the digest fires
+        anyway that same evening — an empty promise. digest_tick must actually
+        skip a digest whose *_digest_enabled pref is 'no'."""
+        s = self.scheduler
+        sent = []
+
+        class FakeBot:
+            async def send_message(self, **kw):
+                sent.append(kw)
+
+        class FakeContext:
+            bot = FakeBot()
+
+        memory.set_setting("pref_evening_digest_enabled", "no")
+        memory.set_setting("pref_evening_digest_time", "00:00")  # guarantee "now" is past it
+        memory.set_setting("pref_morning_digest_enabled", "no")
+        memory.set_setting("pref_morning_digest_time", "00:00")
+        asyncio_run(s.digest_tick(FakeContext()))
+        self.assertEqual(sent, [])
+        self.assertIsNone(memory.get_setting("evening_digest_sent"))
+
+
+def asyncio_run(coro):
+    import asyncio
+    return asyncio.run(coro)
+
 
 class TestMalleability(unittest.TestCase):
     """Every promise Penny can make must have a mechanism behind it."""
@@ -181,8 +209,18 @@ class TestMalleability(unittest.TestCase):
         keys = tools["set_preference"]["input_schema"]["properties"]["key"]["enum"]
         expected = {"reminder_style", "quiet_start_hour", "quiet_end_hour",
                     "morning_digest_time", "evening_digest_time", "emoji_level",
-                    "reply_length", "digest_show_completed", "max_nags"}
+                    "reply_length", "digest_show_completed", "max_nags",
+                    "morning_digest_enabled", "evening_digest_enabled"}
         self.assertTrue(expected.issubset(set(keys)))
+
+    def test_can_actually_disable_a_digest(self):
+        """The exact request that used to be an empty promise: 'I don't need
+        evening check-ins anymore' must have a real mechanism behind it."""
+        r = self.brain._run_tool("set_preference", {"key": "evening_digest_enabled", "value": "sparkly"})
+        self.assertIn("must be", r)
+        r = self.brain._run_tool("set_preference", {"key": "evening_digest_enabled", "value": "no"})
+        self.assertIn("updated", r.lower())
+        self.assertEqual(memory.get_setting("pref_evening_digest_enabled"), "no")
 
     def test_set_preference_validation(self):
         r = self.brain._run_tool("set_preference", {"key": "emoji_level", "value": "sparkly"})

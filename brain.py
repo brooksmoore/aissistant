@@ -109,8 +109,10 @@ MEMORY: The items and facts below are the complete permanent record; the chat sc
 durable personal facts with remember_fact. SHE IS ALWAYS RIGHT about her own life: a correction means the stored \
 fact is wrong — replace it via replaces_fact_id and never repeat or defend the old value.
 
-HER RULES: Style, reminder cadence, quiet hours, digest times and content are hers to set — change them with \
-set_preference and confirm in one sentence. Style feedback gets stored immediately, permanently.
+HER RULES: Style, reminder cadence, quiet hours, and digests (time, content, or off entirely) are hers to set — \
+change them with set_preference and confirm in one sentence. Style feedback gets stored immediately, permanently. \
+NEVER say something is changed, saved, or turned off without a successful tool call behind it — if no tool covers \
+the request, say so plainly instead of confirming a change that didn't happen.
 
 KNOWLEDGE: Answer general-knowledge questions confidently (which stores carry what, typical return windows, \
 cooking, travel basics). You have no live internet — share what you know and name the one thing worth verifying; \
@@ -193,6 +195,8 @@ def _tools() -> list:
                             "quiet_end_hour",       # 0-23
                             "morning_digest_time",  # HH:MM 24h
                             "evening_digest_time",  # HH:MM 24h
+                            "morning_digest_enabled", # yes | no — turn the morning digest off entirely
+                            "evening_digest_enabled", # yes | no — turn the evening digest off entirely
                             "nag_interval_p5",      # minutes between nags for priority 5
                             "nag_interval_p4",
                             "nag_interval_p3",
@@ -301,6 +305,8 @@ def _run_tool(name: str, inp: dict) -> str:
                 return "reply_length must be short or normal."
             if key == "digest_show_completed" and value not in ("yes", "no"):
                 return "digest_show_completed must be yes or no."
+            if key.endswith("_digest_enabled") and value not in ("yes", "no"):
+                return f"{key} must be yes or no."
             if key.endswith("_hour") and not (value.isdigit() and 0 <= int(value) <= 23):
                 return "Hour must be 0-23."
             if key.endswith("_time"):
@@ -363,7 +369,8 @@ def _state_block() -> str:
         # defaults must mirror what the scheduler actually uses (.env-overridable),
         # or the model confidently states wrong quiet hours / digest times
         f"quiet={scheduler.pref('quiet_start_hour', QUIET_START_HOUR)}:00-{scheduler.pref('quiet_end_hour', QUIET_END_HOUR)}:00, "
-        f"digests {scheduler.pref('morning_digest_time', MORNING_DIGEST)} & {scheduler.pref('evening_digest_time', EVENING_DIGEST)}, "
+        f"morning digest {'OFF' if scheduler.pref('morning_digest_enabled', 'yes') == 'no' else scheduler.pref('morning_digest_time', MORNING_DIGEST)}, "
+        f"evening digest {'OFF' if scheduler.pref('evening_digest_enabled', 'yes') == 'no' else scheduler.pref('evening_digest_time', EVENING_DIGEST)}, "
         f"nag cadence P5/P4/P3 = {scheduler.escalation_minutes(5)}/{scheduler.escalation_minutes(4)}/{scheduler.escalation_minutes(3)} min, "
         f"max {scheduler.max_nags()} nags per item"
     )
