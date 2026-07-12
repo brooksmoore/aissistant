@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 import memory
 from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
-from scheduler import pref
+from scheduler import icon, pref
 
 log = logging.getLogger("penny.maintenance")
 
@@ -140,7 +140,7 @@ def _stale_digest_text() -> str | None:
     if not stale:
         return None
     now = datetime.now(TZ)
-    lines = [f"🗂 Weekly tidy-up — these have sat on your list 2+ weeks:"]
+    lines = [f"{icon('🗂')}Weekly tidy-up — these have sat on your list 2+ weeks:"]
     for it in stale[:10]:
         created = memory.parse_dt(it["created_at"])
         since = created.strftime("%b %-d") if created else "a while"

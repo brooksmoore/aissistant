@@ -112,9 +112,11 @@ fact is wrong — replace it via replaces_fact_id and never repeat or defend the
 HER RULES: Style, reminder cadence, quiet hours, digests (time, content, or off entirely), email watching, and \
 "leave me alone for a while" (notifications_enabled — pauses every reminder, digest, and email alert at once, \
 nothing lost, resumes on request) are all hers to set — change them with set_preference and confirm in one \
-sentence. Style feedback gets stored immediately, permanently. NEVER say something is changed, saved, paused, \
-or turned off without a successful tool call behind it — if no tool covers the request, say so plainly instead \
-of confirming a change that didn't happen.
+sentence. emoji_level and reminder_overdue_label genuinely govern reminders/digests/email alerts, not just this \
+chat — if she wants a specific reminder phrased differently (not just less alarming, an actual custom format), \
+say plainly there's no mechanism for that yet rather than promising it. Style feedback gets stored immediately, \
+permanently. NEVER say something is changed, saved, paused, or turned off without a successful tool call behind \
+it — if no tool covers the request, say so plainly instead of confirming a change that didn't happen.
 
 KNOWLEDGE: Answer general-knowledge questions confidently (which stores carry what, typical return windows, \
 cooking, travel basics). You have no live internet — share what you know and name the one thing worth verifying; \
@@ -206,7 +208,8 @@ def _tools() -> list:
                             "nag_interval_p3",
                             "nag_interval_p2",
                             "max_nags",             # pings per item before falling back to digests
-                            "emoji_level",          # none | minimal | normal
+                            "emoji_level",          # none | minimal | normal — applies to scheduled reminders/digests/email alerts too, not just chat replies
+                            "reminder_overdue_label", # yes | no — whether reminders/list/digests call a late item "overdue" at all
                             "reply_length",         # short | normal
                             "digest_show_completed", # yes | no — list finished items in the evening digest
                         ],
@@ -311,7 +314,7 @@ def _run_tool(name: str, inp: dict) -> str:
                 return "digest_show_completed must be yes or no."
             if key.endswith("_digest_enabled") and value not in ("yes", "no"):
                 return f"{key} must be yes or no."
-            if key in ("notifications_enabled", "gmail_watch_enabled") and value not in ("yes", "no"):
+            if key in ("notifications_enabled", "gmail_watch_enabled", "reminder_overdue_label") and value not in ("yes", "no"):
                 return f"{key} must be yes or no."
             if key.endswith("_hour") and not (value.isdigit() and 0 <= int(value) <= 23):
                 return "Hour must be 0-23."
@@ -379,6 +382,7 @@ def _state_block() -> str:
         f"evening digest {'OFF' if scheduler.pref('evening_digest_enabled', 'yes') == 'no' else scheduler.pref('evening_digest_time', EVENING_DIGEST)}, "
         f"nag cadence P5/P4/P3 = {scheduler.escalation_minutes(5)}/{scheduler.escalation_minutes(4)}/{scheduler.escalation_minutes(3)} min, "
         f"max {scheduler.max_nags()} nags per item, "
+        f"reminders call late items 'overdue'={scheduler.pref('reminder_overdue_label', 'yes')}, "
         f"ALL notifications (reminders/digests/email alerts) {'PAUSED' if scheduler.pref('notifications_enabled', 'yes') == 'no' else 'on'}"
         + (f", gmail watch {'OFF' if scheduler.pref('gmail_watch_enabled', 'yes') == 'no' else 'on'}" if gcal.enabled() else "")
     )

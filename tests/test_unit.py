@@ -216,6 +216,54 @@ class TestReminderTiming(unittest.TestCase):
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0]["remind_count"], 0)
 
+    def test_reminder_text_honors_emoji_and_overdue_prefs(self):
+        """Regression for the bug Brooks caught live: reminder text is a plain
+        f-string, never seen by the model, so a preference must be read by
+        scheduler.py directly or it's silently ignored no matter what the
+        model promised in chat."""
+        s = self.scheduler
+        sent = []
+
+        class FakeBot:
+            async def send_message(self, **kw):
+                sent.append(kw)
+
+        class FakeContext:
+            bot = FakeBot()
+
+        memory.set_setting("owner_chat_id", "12345")
+        now = datetime.now(config.TZ)
+        past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
+        item_id = memory.add_item("do the thing", remind_at=past, due_at=past, priority=3)
+
+        # default (minimal emoji, overdue label on): no emoji, word "overdue" kept
+        asyncio_run(s.check_reminders(FakeContext()))
+        self.assertNotIn("⏰", sent[-1]["text"])
+        self.assertIn("overdue", sent[-1]["text"])
+
+        # explicit no-overdue-label: the word must not appear at all
+        memory.update_item(item_id, next_remind_at=past, remind_count=0)
+        memory.set_setting("pref_reminder_overdue_label", "no")
+        sent.clear()
+        asyncio_run(s.check_reminders(FakeContext()))
+        self.assertNotIn("overdue", sent[-1]["text"])
+
+        # normal emoji level: the clock icon comes back
+        memory.update_item(item_id, next_remind_at=past, remind_count=0)
+        memory.set_setting("pref_emoji_level", "normal")
+        sent.clear()
+        asyncio_run(s.check_reminders(FakeContext()))
+        self.assertIn("⏰", sent[-1]["text"])
+
+    def test_render_list_honors_emoji_and_overdue_prefs(self):
+        i = memory.add_item("late thing", due_at="2020-01-01T09:00:00", priority=3)
+        default_text = self.scheduler.render_list(memory.open_items())
+        self.assertIn("overdue", default_text)
+        self.assertNotIn("📋", default_text)  # minimal is the default: header icon suppressed
+        memory.set_setting("pref_reminder_overdue_label", "no")
+        no_overdue_text = self.scheduler.render_list(memory.open_items())
+        self.assertNotIn("overdue", no_overdue_text)
+
 
 def asyncio_run(coro):
     import asyncio
@@ -238,7 +286,8 @@ class TestMalleability(unittest.TestCase):
                     "morning_digest_time", "evening_digest_time", "emoji_level",
                     "reply_length", "digest_show_completed", "max_nags",
                     "morning_digest_enabled", "evening_digest_enabled",
-                    "notifications_enabled", "gmail_watch_enabled"}
+                    "notifications_enabled", "gmail_watch_enabled",
+                    "reminder_overdue_label"}
         self.assertTrue(expected.issubset(set(keys)))
 
     def test_can_pause_all_notifications(self):

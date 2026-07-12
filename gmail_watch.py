@@ -10,7 +10,7 @@ import brain
 import gcal
 import memory
 from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, GOOGLE_TOKEN, TZ
-from scheduler import _quiet, item_buttons, pref
+from scheduler import _quiet, icon as deco_icon, item_buttons, pref
 
 log = logging.getLogger("penny.gmail")
 
@@ -138,7 +138,7 @@ async def poll(context):
         elif e["kind"] == "delivery":
             deliveries.append(e)
     for e in pings:
-        icon = "🚨" if e["kind"] == "urgent" else "💬"
+        icon = deco_icon("🚨").strip() if e["kind"] == "urgent" else deco_icon("💬").strip()
         sender = re.sub(r"\s*<.*>", "", e["sender"]).strip()
         # during quiet hours, don't ping now — but the item still goes on the list
         # with a due reminder, so check_reminders surfaces it right after quiet ends
@@ -151,11 +151,13 @@ async def poll(context):
             remind_at=memory.now_iso() if quiet else None,
         )
         if not quiet:
+            lead = f"{icon} " if icon else ""
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"{icon} Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied.",
+                text=f"{lead}Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied.",
                 reply_markup=item_buttons(item_id),
             )
     if deliveries and not quiet:
-        lines = [f"  📦 {e['summary']}" for e in deliveries[:5]]
+        box = deco_icon("📦")
+        lines = [f"  {box}{e['summary']}" for e in deliveries[:5]]
         await context.bot.send_message(chat_id=chat_id, text="Package update:\n" + "\n".join(lines))

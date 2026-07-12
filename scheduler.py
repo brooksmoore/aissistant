@@ -45,6 +45,16 @@ def max_nags() -> int:
     return n
 
 
+def icon(e: str) -> str:
+    """Decorative emoji for scheduled/templated messages (reminders, digests,
+    gmail alerts) — these are plain Python f-strings, never seen by the model,
+    so emoji_level has to be checked here explicitly or it's silently ignored
+    outside conversation. 'minimal' (the default) and 'none' both suppress
+    decoration here: someone who set minimal does not expect scheduled pings
+    to stay fully decorated just because the model didn't write them."""
+    return f"{e} " if pref("emoji_level", "minimal") == "normal" else ""
+
+
 def _quiet(now: datetime) -> bool:
     h = now.hour
     start = pref_int("quiet_start_hour", QUIET_START_HOUR)
@@ -79,16 +89,23 @@ def checklist_markup(items, max_buttons=8) -> InlineKeyboardMarkup:
 
 
 def render_list(items) -> str:
+    show_overdue = pref("reminder_overdue_label", "yes") == "yes"
     if not items:
-        return "Your list is empty. Nothing is waiting on you right now 🎉"
+        tail = icon("🎉").strip()
+        return f"Your list is empty. Nothing is waiting on you right now{' ' + tail if tail else ''}"
     flame = {5: "🔴", 4: "🟠", 3: "🟡", 2: "🟢", 1: "⚪️"}
-    lines = ["📋 Your list (tap ✓ to check off):", ""]
+    header = icon("📋").strip()
+    lines = [f"{header + ' ' if header else ''}Your list (tap ✓ to check off):", ""]
     now = datetime.now(TZ)
+    warn = icon("⚠️")
     for idx, it in enumerate(items, 1):
         due = ""
         d = memory.parse_dt(it["due_at"])
         if d:
-            due = " — ⚠️ overdue" if d < now else f" — due {d.strftime('%a %-m/%-d %-I:%M%p').replace(':00PM','PM').replace(':00AM','AM')}"
+            if d < now:
+                due = f" — {warn}overdue" if show_overdue else ""
+            else:
+                due = f" — due {d.strftime('%a %-m/%-d %-I:%M%p').replace(':00PM','PM').replace(':00AM','AM')}"
         repeat = " 🔁" if it["recurrence"] else ""
         lines.append(f"{idx}. {flame.get(it['priority'], '🟡')} {it['title']}{due}{repeat}")
     return "\n".join(lines)
@@ -100,15 +117,19 @@ async def check_reminders(context):
     if not chat_id or pref("notifications_enabled", "yes") == "no":
         return  # due items stay due — deferred, not lost, same as quiet hours
     now = datetime.now(TZ)
+    show_overdue = pref("reminder_overdue_label", "yes") == "yes"
     for item in memory.due_reminders(now):
         if _quiet(now) and item["priority"] < 5:
             continue  # will fire right after quiet hours end
         d = memory.parse_dt(item["due_at"])
         when = ""
         if d:
-            when = " (⚠️ overdue)" if d < now else f" (due {d.strftime('%a %-I:%M %p')})"
+            if d < now:
+                when = f" ({icon('⚠️')}overdue)" if show_overdue else ""
+            else:
+                when = f" (due {d.strftime('%a %-I:%M %p')})"
         nag = item["remind_count"]
-        prefix = "⏰ Reminder" if nag == 0 else f"⏰ Nudge #{nag + 1}"
+        prefix = f"{icon('⏰')}Reminder" if nag == 0 else f"{icon('⏰')}Nudge #{nag + 1}"
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -166,7 +187,7 @@ async def morning_digest(context):
         return
     now = datetime.now(TZ)
     items = memory.open_items()
-    parts = [f"☀️ Morning! It's {now.strftime('%A, %B %-d')}."]
+    parts = [f"{icon('☀️')}Morning! It's {now.strftime('%A, %B %-d')}."]
 
     if gcal.enabled():
         # Google HTTP call off the event loop — a slow API must not freeze the bot
@@ -203,7 +224,7 @@ async def evening_digest(context):
     show_done = pref("digest_show_completed", "yes") == "yes"
     done = memory.completed_today()
     items = memory.open_items()
-    parts = ["🌙 Evening check-in."]
+    parts = [f"{icon('🌙')}Evening check-in."]
     if show_done:
         if done:
             parts.append(f"\nYou knocked out {len(done)} thing{'s' if len(done) != 1 else ''} today:")
