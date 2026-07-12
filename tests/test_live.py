@@ -20,7 +20,7 @@ memory.DB_PATH = pathlib.Path("/tmp/penny_livetest.db")  # BEFORE brain import m
 gcal.GOOGLE_TOKEN = pathlib.Path("/tmp/penny_livetest_no_such_token.json")  # force gcal.enabled() False
 import brain  # noqa: E402
 
-BUDGET = 0.10  # hard cap for one full suite run
+BUDGET = 0.12  # hard cap for one full suite run
 
 PASS, FAIL = "PASS", "FAIL"
 results = []
@@ -115,9 +115,37 @@ def run():
     check("safety: a specific item survives alongside a general 'day off' fact",
           "book club" in r.lower(), r[:200])
 
+    # 10. RELIABILITY: real incident (2026-07-12) — asked to remember "AirPods
+    # and Jordan's crossover bag" right before leaving, the model claimed "no
+    # tool to capture items for a specific outing right now" and told the owner
+    # to write it down himself. capture_item has no timing restriction — this
+    # was a hallucinated capability gap, not a real one.
+    before = len(memory.open_items())
+    r = turn("don't let me forget I have my AirPods and Jordan's crossover bag")
+    after = memory.open_items()
+    # split into 1 or 2 distinct items (AirPods / crossover bag) is fine either
+    # way — the bug was capturing NOTHING at all
+    check("reliability: 'don't let me forget X' is captured even mid-departure",
+          len(after) >= before + 1, r[:150])
+    check("reliability: never claims a capability gap that doesn't exist",
+          "no tool" not in r.lower() and "don't have a tool" not in r.lower()
+          and "can't track" not in r.lower(), r[:150])
+
+    # 11. RELIABILITY: real incident (2026-07-12) — replying "headed to X" to a
+    # fired reminder got a content-free "have fun!" with zero mention of the
+    # tracked item, leaving the owner unable to tell if it was still being
+    # watched. Must not guess-complete it either (he hadn't gone yet).
+    item_id = memory.add_item("Go to Watchfest in West Loop", due_at="2026-07-12T18:00:00", priority=3)
+    r = turn("headed to watch fest")
+    still_open_watchfest = memory.get_item(item_id)["status"] == "open"
+    check("reliability: ambiguous 'headed to X' does not guess-complete the item",
+          still_open_watchfest, r[:150])
+    check("reliability: reply still names the tracked item, not a bare pleasantry",
+          "watchfest" in r.lower() or "watch fest" in r.lower(), r[:150])
+
     # 7. COST EFFICIENCY
     total = spent() - start
-    turns = 10
+    turns = 12
     check("cost: whole suite under budget", total <= BUDGET, f"${total:.4f}")
     check("cost: average turn under 1 cent", total / turns < 0.01, f"${total/turns:.4f}/turn")
 
