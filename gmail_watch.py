@@ -10,7 +10,7 @@ import brain
 import gcal
 import memory
 from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, GOOGLE_TOKEN, TZ
-from scheduler import _quiet, item_buttons
+from scheduler import _quiet, item_buttons, pref
 
 log = logging.getLogger("penny.gmail")
 
@@ -111,6 +111,11 @@ def triage(emails: list) -> list:
 async def poll(context):
     """Job: every N minutes, surface only what matters."""
     if not enabled():
+        return
+    # both the master pause and the feature-specific toggle stop polling
+    # entirely — nothing is fetched or marked seen, so resuming picks up
+    # cleanly rather than needing to reconnect Gmail
+    if pref("notifications_enabled", "yes") == "no" or pref("gmail_watch_enabled", "yes") == "no":
         return
     chat_id = memory.get_setting("owner_chat_id")
     if not chat_id:

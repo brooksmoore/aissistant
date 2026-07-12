@@ -109,10 +109,12 @@ MEMORY: The items and facts below are the complete permanent record; the chat sc
 durable personal facts with remember_fact. SHE IS ALWAYS RIGHT about her own life: a correction means the stored \
 fact is wrong — replace it via replaces_fact_id and never repeat or defend the old value.
 
-HER RULES: Style, reminder cadence, quiet hours, and digests (time, content, or off entirely) are hers to set — \
-change them with set_preference and confirm in one sentence. Style feedback gets stored immediately, permanently. \
-NEVER say something is changed, saved, or turned off without a successful tool call behind it — if no tool covers \
-the request, say so plainly instead of confirming a change that didn't happen.
+HER RULES: Style, reminder cadence, quiet hours, digests (time, content, or off entirely), email watching, and \
+"leave me alone for a while" (notifications_enabled — pauses every reminder, digest, and email alert at once, \
+nothing lost, resumes on request) are all hers to set — change them with set_preference and confirm in one \
+sentence. Style feedback gets stored immediately, permanently. NEVER say something is changed, saved, paused, \
+or turned off without a successful tool call behind it — if no tool covers the request, say so plainly instead \
+of confirming a change that didn't happen.
 
 KNOWLEDGE: Answer general-knowledge questions confidently (which stores carry what, typical return windows, \
 cooking, travel basics). You have no live internet — share what you know and name the one thing worth verifying; \
@@ -197,6 +199,8 @@ def _tools() -> list:
                             "evening_digest_time",  # HH:MM 24h
                             "morning_digest_enabled", # yes | no — turn the morning digest off entirely
                             "evening_digest_enabled", # yes | no — turn the evening digest off entirely
+                            "notifications_enabled", # yes | no — master pause: reminders, digests, and email alerts all go silent (nothing is lost, they resume once turned back on)
+                            "gmail_watch_enabled",  # yes | no — stop watching/pinging about email (only meaningful once Gmail is connected)
                             "nag_interval_p5",      # minutes between nags for priority 5
                             "nag_interval_p4",
                             "nag_interval_p3",
@@ -307,6 +311,8 @@ def _run_tool(name: str, inp: dict) -> str:
                 return "digest_show_completed must be yes or no."
             if key.endswith("_digest_enabled") and value not in ("yes", "no"):
                 return f"{key} must be yes or no."
+            if key in ("notifications_enabled", "gmail_watch_enabled") and value not in ("yes", "no"):
+                return f"{key} must be yes or no."
             if key.endswith("_hour") and not (value.isdigit() and 0 <= int(value) <= 23):
                 return "Hour must be 0-23."
             if key.endswith("_time"):
@@ -372,7 +378,9 @@ def _state_block() -> str:
         f"morning digest {'OFF' if scheduler.pref('morning_digest_enabled', 'yes') == 'no' else scheduler.pref('morning_digest_time', MORNING_DIGEST)}, "
         f"evening digest {'OFF' if scheduler.pref('evening_digest_enabled', 'yes') == 'no' else scheduler.pref('evening_digest_time', EVENING_DIGEST)}, "
         f"nag cadence P5/P4/P3 = {scheduler.escalation_minutes(5)}/{scheduler.escalation_minutes(4)}/{scheduler.escalation_minutes(3)} min, "
-        f"max {scheduler.max_nags()} nags per item"
+        f"max {scheduler.max_nags()} nags per item, "
+        f"ALL notifications (reminders/digests/email alerts) {'PAUSED' if scheduler.pref('notifications_enabled', 'yes') == 'no' else 'on'}"
+        + (f", gmail watch {'OFF' if scheduler.pref('gmail_watch_enabled', 'yes') == 'no' else 'on'}" if gcal.enabled() else "")
     )
     return (
         f"\n--- CURRENT STATE ---\n"

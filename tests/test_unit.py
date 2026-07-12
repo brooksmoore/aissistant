@@ -189,6 +189,33 @@ class TestReminderTiming(unittest.TestCase):
         self.assertEqual(sent, [])
         self.assertIsNone(memory.get_setting("evening_digest_sent"))
 
+    def test_master_pause_silences_reminders_and_digests(self):
+        """notifications_enabled='no' is the broad fix: it must silence every
+        proactive channel at once (not just the one the owner happened to name),
+        without losing or marking anything as sent."""
+        s = self.scheduler
+        sent = []
+
+        class FakeBot:
+            async def send_message(self, **kw):
+                sent.append(kw)
+
+        class FakeContext:
+            bot = FakeBot()
+
+        memory.set_setting("owner_chat_id", "12345")
+        now = datetime.now(config.TZ)
+        past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
+        memory.add_item("overdue thing", remind_at=past, due_at=past, priority=3)
+        memory.set_setting("pref_notifications_enabled", "no")
+        asyncio_run(s.check_reminders(FakeContext()))
+        asyncio_run(s.digest_tick(FakeContext()))
+        self.assertEqual(sent, [])
+        # the reminder is deferred, not lost: still due, remind_count untouched
+        due = memory.due_reminders(now)
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["remind_count"], 0)
+
 
 def asyncio_run(coro):
     import asyncio
@@ -210,8 +237,21 @@ class TestMalleability(unittest.TestCase):
         expected = {"reminder_style", "quiet_start_hour", "quiet_end_hour",
                     "morning_digest_time", "evening_digest_time", "emoji_level",
                     "reply_length", "digest_show_completed", "max_nags",
-                    "morning_digest_enabled", "evening_digest_enabled"}
+                    "morning_digest_enabled", "evening_digest_enabled",
+                    "notifications_enabled", "gmail_watch_enabled"}
         self.assertTrue(expected.issubset(set(keys)))
+
+    def test_can_pause_all_notifications(self):
+        r = self.brain._run_tool("set_preference", {"key": "notifications_enabled", "value": "maybe"})
+        self.assertIn("must be", r)
+        r = self.brain._run_tool("set_preference", {"key": "notifications_enabled", "value": "no"})
+        self.assertIn("updated", r.lower())
+        self.assertEqual(memory.get_setting("pref_notifications_enabled"), "no")
+
+    def test_can_disable_gmail_watch(self):
+        r = self.brain._run_tool("set_preference", {"key": "gmail_watch_enabled", "value": "no"})
+        self.assertIn("updated", r.lower())
+        self.assertEqual(memory.get_setting("pref_gmail_watch_enabled"), "no")
 
     def test_can_actually_disable_a_digest(self):
         """The exact request that used to be an empty promise: 'I don't need

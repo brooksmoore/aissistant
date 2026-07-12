@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 import memory
 from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
+from scheduler import pref
 
 log = logging.getLogger("penny.maintenance")
 
@@ -163,7 +164,9 @@ async def weekly_tick(context):
 
     chat_id = memory.get_setting("owner_chat_id")
     text = _stale_digest_text()
-    if chat_id and text:
+    # notifications_enabled only silences the PING — fact tidy-up below still
+    # runs regardless, since it's silent housekeeping, not a message to her
+    if chat_id and text and pref("notifications_enabled", "yes") != "no":
         try:
             await context.bot.send_message(chat_id=chat_id, text=text)
         except Exception:

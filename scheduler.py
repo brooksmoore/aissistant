@@ -97,8 +97,8 @@ def render_list(items) -> str:
 async def check_reminders(context):
     """Runs every minute. Sends due reminder pings with check-off buttons."""
     chat_id = memory.get_setting("owner_chat_id")
-    if not chat_id:
-        return
+    if not chat_id or pref("notifications_enabled", "yes") == "no":
+        return  # due items stay due — deferred, not lost, same as quiet hours
     now = datetime.now(TZ)
     for item in memory.due_reminders(now):
         if _quiet(now) and item["priority"] < 5:
@@ -129,6 +129,8 @@ async def check_reminders(context):
 async def digest_tick(context):
     """Runs every minute; fires digests at their (chat-adjustable) times.
     If the Mac was asleep at digest time, sends within a 2h grace window."""
+    if pref("notifications_enabled", "yes") == "no":
+        return  # deferred, not lost — resumes firing once turned back on
     now = datetime.now(TZ)
     today = now.date().isoformat()
     for name, default, fn in (
