@@ -12,3 +12,9 @@ __pycache__/
 *.pyc
 .DS_Store
 voice_*.oga
+
+# handoffs between AI sessions: not product code, may reference live incidents
+SONNET_HANDOFF*.md
+DONE_SONNET_HANDOFF*.md
+SONNET_TO_FABLE*.md
+*_RESULTS.md
