@@ -182,8 +182,13 @@ async def check_reminders(context):
         d = memory.parse_dt(it["due_at"])
         if d and (now - d).total_seconds() > NAG_WINDOW_HOURS * 3600:
             # past the chase window: stop nagging, let the morning digest's
-            # stale sweep surface it gently instead of pinging forever
-            memory.update_item(it["id"], next_remind_at=None)
+            # stale sweep surface it gently instead of pinging forever.
+            # remind_count must end up >0 here even if this is the very first
+            # check (bot was down, item surfaced already 24h+ overdue) — that's
+            # the signal due_nags() uses to tell "never nagged" apart from
+            # "deliberately stopped nagging"; leaving it at 0 would make this
+            # item look fresh again on the very next tick.
+            memory.update_item(it["id"], next_remind_at=None, remind_count=max(it["remind_count"], 1))
             continue
         if it["priority"] < 5 and budget_left <= 0:
             continue  # daily cap respected for nags (never for scheduled/P5 — see handoff B4)
@@ -296,7 +301,11 @@ async def morning_digest(context):
         parts.append("\nNeeds you today:")
         for i in due_today[:6]:
             parts.append(f"  • {i['title']}")
-    top = [i for i in items if i not in due_today][:3]
+    # "spare energy" is for flexible work she could get ahead on — a fixed-time
+    # future event (a dinner reservation, a trivia night) can't be done early no
+    # matter how much energy she has, so it must never land in this bucket just
+    # because it happens to not be due today
+    top = [i for i in items if i not in due_today and i["category"] not in ("social", "appointment")][:3]
     if top:
         parts.append("\nIf there's spare energy:")
         for i in top:

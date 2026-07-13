@@ -249,7 +249,15 @@ def due_nags(now: datetime) -> list:
     """Open items whose due_at has passed and are due for another nag ping —
     the repeating 'still not done' chase. Separate from one-shot scheduled
     reminders (due_scheduled_reminders): a nag only starts once an item is
-    actually overdue, and next_remind_at/remind_count pace the repeats."""
+    actually overdue, and next_remind_at/remind_count pace the repeats.
+
+    next_remind_at=NULL is ambiguous on its own: it means "never nagged yet"
+    for a fresh item (remind_count=0) but "nagging was deliberately stopped"
+    once at least one nag has fired (remind_count>0 — checker sets it to NULL
+    on purpose at the max-nags cap, the priority-1 one-shot case, and the 24h
+    NAG_WINDOW cutoff). Treating both as "eligible now" turned every one of
+    those intentional stops into an every-60-seconds nag storm instead —
+    confirmed live (an item nagged 13+ times a minute apart)."""
     with _c() as con:
         rows = con.execute(
             "SELECT * FROM items WHERE status='open' AND due_at IS NOT NULL"
@@ -259,6 +267,8 @@ def due_nags(now: datetime) -> list:
         d = parse_dt(r["due_at"])
         if not d or d > now:
             continue
+        if r["remind_count"] > 0 and not r["next_remind_at"]:
+            continue  # nagging was deliberately stopped — never re-select
         nxt = parse_dt(r["next_remind_at"])
         if nxt and nxt > now:
             continue  # already nagged, waiting for the next escalation interval

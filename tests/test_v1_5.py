@@ -218,7 +218,47 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
         ctx = FakeContext()
         run(self.scheduler.check_reminders(ctx))
         self.assertEqual(ctx.bot.sent, [])  # past the 24h chase window — not nagged
+        item = memory.get_item(i)
+        self.assertIsNone(item["next_remind_at"])
+        self.assertGreaterEqual(item["remind_count"], 1)  # so due_nags() knows this was a deliberate stop
+        # regression: a second tick must NOT re-select it either. This is the
+        # exact live bug — remind_count=0 + next_remind_at=NULL used to look
+        # identical to "never nagged," so a stopped item got re-nagged every
+        # single minute forever instead of staying stopped.
+        run(self.scheduler.check_reminders(ctx))
+        self.assertEqual(ctx.bot.sent, [])
+
+    def test_stopped_nag_never_fires_again_even_after_max_nags(self):
+        """Real incident (2026-07-13, jarvis): an item hit max_nags, next_remind_at
+        went to NULL as designed, but due_nags() couldn't tell that apart from
+        'never nagged yet' — so it fired again every ~60 seconds indefinitely.
+        Confirmed live: remind_count reached 13+ nudges a minute apart."""
+        now = datetime.now(config.TZ)
+        past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
+        i = memory.add_item("nagged into the ground", due_at=past, priority=3)
+        memory.delete_unfired_reminders(i)
+        memory.update_item(i, next_remind_at=past, remind_count=self.scheduler.max_nags())
+        ctx = FakeContext()
+        run(self.scheduler.check_reminders(ctx))  # this tick exhausts it and sets next_remind_at=NULL
+        self.assertEqual(len(ctx.bot.sent), 1)
+        item = memory.get_item(i)
+        self.assertIsNone(item["next_remind_at"])
+        for _ in range(3):  # simulate several more minute-ticks
+            run(self.scheduler.check_reminders(ctx))
+        self.assertEqual(len(ctx.bot.sent), 1)  # still just the one send, not one per tick
+
+    def test_fresh_overdue_item_still_nags_once_with_zero_remind_count(self):
+        """The fix must not overcorrect: remind_count=0 + next_remind_at=NULL is
+        the normal state of an item that just became overdue and has never been
+        nagged — it must still fire its first nag."""
+        now = datetime.now(config.TZ)
+        past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
+        i = memory.add_item("freshly overdue", due_at=past, priority=3)
+        memory.delete_unfired_reminders(i)
+        self.assertEqual(memory.get_item(i)["remind_count"], 0)
         self.assertIsNone(memory.get_item(i)["next_remind_at"])
+        due = memory.due_nags(now)
+        self.assertEqual([d["id"] for d in due], [i])
 
     def test_stale_item_appears_in_morning_digest_with_buttons(self):
         now = datetime.now(config.TZ)
@@ -234,6 +274,31 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
 
     def test_max_nags_default_is_five(self):
         self.assertEqual(self.scheduler.MAX_NAGS, 5)
+
+
+class TestSpareEnergySection(unittest.TestCase):
+    """Real incident (2026-07-13, jarvis): the morning digest's 'if there's
+    spare energy' section listed a dinner reservation and a trivia night —
+    fixed-time future events that are literally impossible to act on early,
+    unlike a flexible task (e.g. writing a card) that legitimately can be."""
+
+    def setUp(self):
+        fresh_db()
+        import scheduler
+        self.scheduler = scheduler
+        memory.set_setting("owner_chat_id", "12345")
+
+    def test_social_and_appointment_items_excluded_from_spare_energy(self):
+        future = "2099-01-01T19:00:00"
+        memory.add_item("Dinner with Jordan and her parents", due_at=future, category="social")
+        memory.add_item("Doctor appointment", due_at=future, category="appointment")
+        memory.add_item("Write Jordan a birthday card", due_at=future, category="task")
+        ctx = FakeContext()
+        run(self.scheduler.morning_digest(ctx))
+        text = ctx.bot.sent[0]["text"]
+        self.assertIn("Write Jordan a birthday card", text)
+        self.assertNotIn("Dinner with Jordan", text)
+        self.assertNotIn("Doctor appointment", text)
 
 
 class TestMuteButtonDBEffect(unittest.TestCase):
