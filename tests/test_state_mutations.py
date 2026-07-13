@@ -94,7 +94,9 @@ class TestItemMutationEdgeCases(unittest.TestCase):
         i = memory.add_item("x", due_at="2026-08-10T17:00:00", remind_at="2026-08-08T09:00:00")
         row = memory.get_item(i)
         self.assertEqual(row["due_at"], "2026-08-10T17:00:00")
-        self.assertEqual(row["next_remind_at"], "2026-08-08T09:00:00")
+        # scheduled ping lives in `reminders` now; next_remind_at is nag-only
+        self.assertEqual(memory.pending_reminder_times(i), ["2026-08-08T09:00:00"])
+        self.assertIsNone(row["next_remind_at"])
 
     def test_open_items_ordering_priority_desc_then_due_at(self):
         memory.add_item("low, no due", priority=2)
@@ -105,13 +107,13 @@ class TestItemMutationEdgeCases(unittest.TestCase):
         self.assertEqual(titles, ["high, sooner due", "high, later due", "mid, no due", "low, no due"])
 
     def test_due_reminders_excludes_items_with_no_reminder_set(self):
-        """An item can be overdue (due_at in the past) without ever being
-        due for a PING if next_remind_at was never set (remind_at omitted
-        and no due_at at creation) — due_reminders must key off
-        next_remind_at, not due_at."""
+        """An item with neither due_at nor remind_at must never be treated as
+        due — no scheduled ping was ever created, and there's no due_at to
+        make it nag-eligible either."""
         memory.add_item("no ping wanted", due_at=None, remind_at=None)
         now = datetime.now(config.TZ)
-        self.assertEqual(memory.due_reminders(now), [])
+        self.assertEqual(memory.due_scheduled_reminders(now), [])
+        self.assertEqual(memory.due_nags(now), [])
 
     def test_stale_open_items_excludes_recurring_and_respects_cutoff(self):
         old = (datetime.now(config.TZ) - timedelta(days=20)).isoformat(timespec="seconds")
@@ -194,6 +196,7 @@ VALID_VALUES = {
     "reply_length": "short",
     "digest_show_completed": "no",
     "reminder_overdue_label": "no",
+    "daily_ping_cap": "5",
 }
 INVALID_VALUES = {
     "reminder_style": "aggressive",
@@ -214,6 +217,7 @@ INVALID_VALUES = {
     "reply_length": "long",
     "digest_show_completed": "sure",
     "reminder_overdue_label": "sure",
+    "daily_ping_cap": "many",
 }
 
 

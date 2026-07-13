@@ -34,7 +34,10 @@ class TestMemoryReliability(unittest.TestCase):
         row = memory.get_item(i)
         self.assertEqual(row["title"], "Test task")
         self.assertEqual(row["priority"], 4)
-        self.assertEqual(row["next_remind_at"], "2026-08-01T09:00:00")  # due implies remind
+        # due implies a scheduled ping at due time (v1.5: lives in `reminders`,
+        # not next_remind_at — that column is reserved for the nag chase now)
+        self.assertEqual(memory.pending_reminder_times(i), ["2026-08-01T09:00:00"])
+        self.assertIsNone(row["next_remind_at"])
 
     def test_complete_clears_reminder(self):
         i = memory.add_item("x", due_at="2026-08-01T09:00:00")
@@ -104,12 +107,15 @@ class TestRecurrenceTiming(unittest.TestCase):
         memory.complete_item(i)
         nxt = memory.open_items()[0]
         due = memory.parse_dt(nxt["due_at"])
-        remind = memory.parse_dt(nxt["next_remind_at"])
+        remind_times = memory.pending_reminder_times(nxt["id"])
+        self.assertEqual(len(remind_times), 1)
+        remind = memory.parse_dt(remind_times[0])
         self.assertEqual(due - remind, timedelta(days=2, hours=8))
 
     def test_lead_time_survives_nag_drift(self):
-        """Nags overwrite next_remind_at; the respawned occurrence must still use
-        the ORIGINAL lead, not the drifted (possibly past-due or NULL) nag time."""
+        """Nags overwrite next_remind_at (the NAG chase, not the scheduled ping);
+        the respawned occurrence must still use the ORIGINAL lead from
+        remind_lead_seconds, not anything derived from the drifted nag state."""
         i = memory.add_item("Pay rent", due_at="2026-08-10T17:00:00",
                             remind_at="2026-08-08T09:00:00", recurrence="monthly")
         # simulate the nag engine pushing the reminder past the due date
@@ -117,7 +123,9 @@ class TestRecurrenceTiming(unittest.TestCase):
         memory.complete_item(i)
         nxt = memory.open_items()[0]
         due = memory.parse_dt(nxt["due_at"])
-        remind = memory.parse_dt(nxt["next_remind_at"])
+        remind_times = memory.pending_reminder_times(nxt["id"])
+        self.assertEqual(len(remind_times), 1)
+        remind = memory.parse_dt(remind_times[0])
         self.assertEqual(due - remind, timedelta(days=2, hours=8))
 
     def test_double_complete_spawns_only_one_occurrence(self):
@@ -143,8 +151,18 @@ class TestReminderTiming(unittest.TestCase):
         future = (now + timedelta(hours=2)).isoformat(timespec="seconds")
         memory.add_item("due now", remind_at=past, due_at=past)
         memory.add_item("not yet", remind_at=future, due_at=future)
-        due = memory.due_reminders(now)
+        due = memory.due_scheduled_reminders(now)
         self.assertEqual([d["title"] for d in due], ["due now"])
+
+    def test_nag_only_starts_once_due_at_has_passed(self):
+        """The v1.5 split: due_nags is the repeating overdue chase, distinct from
+        a one-shot scheduled reminder — it must never fire before due_at, even if
+        a nag-track field were (incorrectly) populated early."""
+        now = datetime.now(config.TZ)
+        future = (now + timedelta(hours=2)).isoformat(timespec="seconds")
+        i = memory.add_item("not due yet", due_at=future)
+        memory.update_item(i, next_remind_at=(now - timedelta(minutes=1)).isoformat(timespec="seconds"))
+        self.assertEqual(memory.due_nags(now), [])
 
     def test_escalation_by_priority_and_style(self):
         s = self.scheduler
@@ -204,6 +222,8 @@ class TestReminderTiming(unittest.TestCase):
             bot = FakeBot()
 
         memory.set_setting("owner_chat_id", "12345")
+        memory.set_setting("pref_quiet_start_hour", "0")  # zero-width window: never quiet,
+        memory.set_setting("pref_quiet_end_hour", "0")    # so this test is time-of-day independent
         now = datetime.now(config.TZ)
         past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
         memory.add_item("overdue thing", remind_at=past, due_at=past, priority=3)
@@ -212,7 +232,7 @@ class TestReminderTiming(unittest.TestCase):
         asyncio_run(s.digest_tick(FakeContext()))
         self.assertEqual(sent, [])
         # the reminder is deferred, not lost: still due, remind_count untouched
-        due = memory.due_reminders(now)
+        due = memory.due_scheduled_reminders(now)
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0]["remind_count"], 0)
 
@@ -232,27 +252,33 @@ class TestReminderTiming(unittest.TestCase):
             bot = FakeBot()
 
         memory.set_setting("owner_chat_id", "12345")
+        memory.set_setting("pref_quiet_start_hour", "0")  # zero-width window: never quiet,
+        memory.set_setting("pref_quiet_end_hour", "0")    # so this test is time-of-day independent
         now = datetime.now(config.TZ)
         past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
-        item_id = memory.add_item("do the thing", remind_at=past, due_at=past, priority=3)
+        item_id = memory.add_item("do the thing", due_at=past, priority=3)
+        # "overdue" wording only applies to the NAG chase, not a one-shot scheduled
+        # ping — isolate the nag path by clearing the auto-scheduled first reminder
+        memory.delete_unfired_reminders(item_id)
+
+        def fire():
+            memory.update_item(item_id, next_remind_at=past, remind_count=0)
+            sent.clear()
+            asyncio_run(s.check_reminders(FakeContext()))
 
         # default (minimal emoji, overdue label on): no emoji, word "overdue" kept
-        asyncio_run(s.check_reminders(FakeContext()))
+        fire()
         self.assertNotIn("⏰", sent[-1]["text"])
         self.assertIn("overdue", sent[-1]["text"])
 
         # explicit no-overdue-label: the word must not appear at all
-        memory.update_item(item_id, next_remind_at=past, remind_count=0)
         memory.set_setting("pref_reminder_overdue_label", "no")
-        sent.clear()
-        asyncio_run(s.check_reminders(FakeContext()))
+        fire()
         self.assertNotIn("overdue", sent[-1]["text"])
 
         # normal emoji level: the clock icon comes back
-        memory.update_item(item_id, next_remind_at=past, remind_count=0)
         memory.set_setting("pref_emoji_level", "normal")
-        sent.clear()
-        asyncio_run(s.check_reminders(FakeContext()))
+        fire()
         self.assertIn("⏰", sent[-1]["text"])
 
     def test_render_list_honors_emoji_and_overdue_prefs(self):

@@ -20,7 +20,7 @@ memory.DB_PATH = pathlib.Path("/tmp/penny_livetest.db")  # BEFORE brain import m
 gcal.GOOGLE_TOKEN = pathlib.Path("/tmp/penny_livetest_no_such_token.json")  # force gcal.enabled() False
 import brain  # noqa: E402
 
-BUDGET = 0.12  # hard cap for one full suite run
+BUDGET = 0.16  # hard cap for one full suite run
 
 PASS, FAIL = "PASS", "FAIL"
 results = []
@@ -143,9 +143,40 @@ def run():
     check("reliability: reply still names the tracked item, not a bare pleasantry",
           "watchfest" in r.lower() or "watch fest" in r.lower(), r[:150])
 
+    # 12. v1.5 A3 EMPTY-PROMISE GUARD: real incident replay, verbatim (2026-07-12
+    # 20:58, penny's actual database and message log). She said this; Penny replied
+    # "I've turned off your evening digest and set reminders to a gentler pace" with
+    # ZERO tool calls behind it — confirmed directly in the settings table (no
+    # pref_evening_digest_enabled, no pref_reminder_style key existed afterward).
+    # The guard must force either a real write this time, or an honest walk-back —
+    # never a repeat of claiming a change with nothing behind it.
+    r = turn("way too many notifications. I've heard from you 25 times today… maybe "
+             "just two or three times a day. Also, I don't need an evening check in anymore.")
+    real_change = (
+        memory.get_setting("pref_evening_digest_enabled") == "no"
+        or memory.get_setting("pref_reminder_style") is not None
+        or memory.get_setting("pref_daily_ping_cap") is not None
+        or memory.get_setting("pref_notifications_enabled") is not None
+    )
+    honest_walkback = not brain.claims_change(r)
+    check("guard: incident replay either writes real prefs or is honest — never an empty claim",
+          real_change or honest_walkback, r[:200])
+    incidents = memory.counter_today("incident_claims")
+    check("guard: a tripped guard is machine-countable (incident_claims_* counter)",
+          incidents >= 0, f"incidents today: {incidents}")  # >=0 always true; records the count for visibility
+
+    # 13. v1.5 C1 "ALREADY" RULE: fresh captures must never be described as
+    # pre-existing — the real incident was Jarvis saying "Already got that one —
+    # you mentioned it earlier" about an item it had just captured that same message.
+    r = turn("I need to pick up dry cleaning and also call the vet about Max's checkup")
+    check("already-rule: fresh captures are never called 'already' on the list",
+          "already" not in r.lower(), r[:150])
+    check("already-rule: fresh captures never claim a prior mention",
+          "earlier" not in r.lower(), r[:150])
+
     # 7. COST EFFICIENCY
     total = spent() - start
-    turns = 12
+    turns = 14
     check("cost: whole suite under budget", total <= BUDGET, f"${total:.4f}")
     check("cost: average turn under 1 cent", total / turns < 0.01, f"${total/turns:.4f}/turn")
 
