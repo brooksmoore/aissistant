@@ -73,8 +73,17 @@ For each email below, classify it:
 - "fyi": mildly useful info, no action
 - "ignore": marketing, newsletters, promos, notifications nobody reads
 
+Mailing lists, neighborhood platforms (Nextdoor and the like), newsletters, and automated/no-reply senders are \
+NEVER "urgent" or "needs_reply" — regardless of how emotional or urgent-sounding the content is. "needs_reply" \
+strictly means one individual person personally addressing HER by name or context, not a broadcast post. \
+Example: a Nextdoor neighborhood post announcing a death in the community is heartfelt but is "fyi" at most — \
+it is not a person waiting on a reply from her, and its raw text must never become a task on her list.
+
+For each email also write "topic": a neutral 3-6 word summary suitable as a task title (never the raw subject \
+or preview verbatim — especially never verbatim distressing/personal content from someone else's message).
+
 Reply with ONLY a JSON array like:
-[{"id": "...", "kind": "urgent|needs_reply|delivery|fyi|ignore", "summary": "one short human sentence"}]
+[{"id": "...", "kind": "urgent|needs_reply|delivery|fyi|ignore", "summary": "one short human sentence", "topic": "3-6 word neutral topic"}]
 
 Emails:
 """
@@ -99,12 +108,17 @@ def triage(emails: list) -> list:
     for r in results:
         e = by_id.get(r.get("id"))
         if e:
-            out.append({**e, "kind": r.get("kind", "fyi"), "summary": r.get("summary", e["subject"])})
+            out.append({
+                **e,
+                "kind": r.get("kind", "fyi"),
+                "summary": r.get("summary", e["subject"]),
+                "topic": r.get("topic", e["subject"])[:70],
+            })
     # anything the model dropped: mark fyi so we don't reprocess forever
     triaged_ids = {r.get("id") for r in results}
     for e in emails:
         if e["id"] not in triaged_ids:
-            out.append({**e, "kind": "fyi", "summary": e["subject"]})
+            out.append({**e, "kind": "fyi", "summary": e["subject"], "topic": e["subject"][:70]})
     return out
 
 
@@ -130,34 +144,50 @@ async def poll(context):
         return
     triaged = await asyncio.to_thread(triage, emails)
     quiet = _quiet(datetime.now(TZ))
-    pings, deliveries = [], []
+    urgent, needs_reply, deliveries = [], [], []
     for e in triaged:
         memory.mark_email(e["id"], e["sender"], e["subject"], e["summary"], e["kind"])
-        if e["kind"] in ("urgent", "needs_reply"):
-            pings.append(e)
+        if e["kind"] == "urgent":
+            urgent.append(e)
+        elif e["kind"] == "needs_reply":
+            needs_reply.append(e)
         elif e["kind"] == "delivery":
             deliveries.append(e)
-    for e in pings:
-        icon = deco_icon("🚨").strip() if e["kind"] == "urgent" else deco_icon("💬").strip()
+
+    # needs_reply goes on the list + next digest silently — no standalone ping.
+    # Only "urgent" (time-sensitive, personally important) interrupts immediately.
+    for e in needs_reply:
+        sender = re.sub(r"\s*<.*>", "", e["sender"]).strip()
+        memory.add_item(
+            title=f"Reply to {sender} — {e['topic']}"[:70],
+            details=e["summary"],
+            category="message",
+            priority=3,
+        )
+
+    for e in urgent:
         sender = re.sub(r"\s*<.*>", "", e["sender"]).strip()
         # during quiet hours, don't ping now — but the item still goes on the list
         # with a due reminder, so check_reminders surfaces it right after quiet ends
         # (previously these were marked seen and silently lost forever)
         item_id = memory.add_item(
-            title=f"Reply to {sender}: {e['subject'][:60]}",
+            title=f"Reply to {sender} — {e['topic']}"[:70],
             details=e["summary"],
             category="message",
-            priority=4 if e["kind"] == "urgent" else 3,
+            priority=4,
             remind_at=memory.now_iso() if quiet else None,
         )
         if not quiet:
+            icon = deco_icon("🚨").strip()
             lead = f"{icon} " if icon else ""
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"{lead}Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied.",
-                reply_markup=item_buttons(item_id),
-            )
+            text = f"{lead}Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied."
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=item_buttons(item_id))
+            memory.log_msg("assistant", f"[email] {text}")
+            memory.bump_counter("pings", 1)
     if deliveries and not quiet:
         box = deco_icon("📦")
         lines = [f"  {box}{e['summary']}" for e in deliveries[:5]]
-        await context.bot.send_message(chat_id=chat_id, text="Package update:\n" + "\n".join(lines))
+        text = "Package update:\n" + "\n".join(lines)
+        await context.bot.send_message(chat_id=chat_id, text=text)
+        memory.log_msg("assistant", f"[email] {text}")
+        memory.bump_counter("pings", 1)

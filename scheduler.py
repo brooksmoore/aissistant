@@ -1,5 +1,15 @@
-"""Reminder engine + daily digests. Reminders escalate by priority and keep
-nagging (gently) until she taps ✓ Done. Quiet hours are respected except P5."""
+"""Reminder engine + daily digests.
+
+v1.5 split (see SONNET_HANDOFF_v1.5.md): a SCHEDULED reminder (a moment she
+asked to be pinged — `reminders` table, one-shot) is now a different thing
+from a NAG (the repeating "still not done" chase, item.next_remind_at /
+remind_count, which only starts once due_at has actually passed). Before
+this split they shared one column, which is why a party-time ping and an
+overdue chase used to be indistinguishable, and why "remind me at 3pm" could
+turn into an infinite nag chain with no relationship to any deadline.
+Quiet hours are respected except P5. Everything proactive is budgeted
+(daily_ping_cap) and logged to the messages table so the brain can see its
+own pings."""
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -14,7 +24,9 @@ log = logging.getLogger("penny.scheduler")
 
 # minutes between repeat nags, by priority (0 = remind once, then digests only)
 ESCALATION_MIN = {5: 30, 4: 120, 3: 360, 2: 1440, 1: 0}
-MAX_NAGS = 12  # after this many pings, fall back to digests only
+MAX_NAGS = 5  # after this many pings, fall back to digests only (was 12 — the flood's biggest lever)
+NAG_WINDOW_HOURS = 24  # a nag chain stops chasing this long past due_at; item falls to the stale sweep instead
+DAILY_PING_CAP = 10  # soft cap on proactive sends/day; scheduled (one-shot) reminders and P5 are always exempt
 
 # She can change all of this by just asking Penny — stored as pref_* settings.
 STYLE_MULT = {"gentle": 2.0, "normal": 1.0, "persistent": 0.5}
@@ -64,12 +76,30 @@ def _quiet(now: datetime) -> bool:
     return start <= h < end
 
 
-def item_buttons(item_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
+def pings_today() -> int:
+    return memory.counter_today("pings")
+
+
+def _bump_pings(n: int = 1) -> int:
+    return memory.bump_counter("pings", n)
+
+
+def _log_proactive(prefix: str, text: str):
+    """Every scheduled send is logged to the messages table so the brain can
+    see its own pings — a reply like 'headed to watch fest' now has its
+    trigger in history instead of looking unprompted."""
+    memory.log_msg("assistant", f"[{prefix}] {text}")
+
+
+def item_buttons(item_id: int, mute: bool = False) -> InlineKeyboardMarkup:
+    row = [
         InlineKeyboardButton("✅ Done", callback_data=f"done:{item_id}"),
         InlineKeyboardButton("⏰ +1h", callback_data=f"snooze:{item_id}:60"),
         InlineKeyboardButton("🌙 Tomorrow", callback_data=f"tmrw:{item_id}"),
-    ]])
+    ]
+    if mute:
+        row.append(InlineKeyboardButton("🔕", callback_data=f"mute:{item_id}"))
+    return InlineKeyboardMarkup([row])
 
 
 def checklist_markup(items, max_buttons=8) -> InlineKeyboardMarkup:
@@ -111,40 +141,101 @@ def render_list(items) -> str:
     return "\n".join(lines)
 
 
+def _reminder_text(entry: dict, show_overdue: bool) -> str:
+    """entry: {'item': row, 'kind': 'scheduled'|'nag'}. A custom reminder_text
+    on the item (E2) overrides the default template verbatim for BOTH kinds —
+    it's her wording for every future ping on this item, not just one."""
+    it = entry["item"]
+    if it["reminder_text"]:
+        return it["reminder_text"]
+    if entry["kind"] == "scheduled":
+        return f"{icon('⏰')}Reminder: {it['title']}"
+    when = f" ({icon('⚠️')}overdue)" if show_overdue else ""
+    prefix = f"{icon('⏰')}Nudge #{it['remind_count'] + 1}"
+    return f"{prefix}: {it['title']}{when}"
+
+
 async def check_reminders(context):
-    """Runs every minute. Sends due reminder pings with check-off buttons."""
+    """Runs every minute. Collects everything due this tick — scheduled
+    one-shot pings and nag escalations, separately — and sends one message
+    if there's more than one due at once instead of flooding N messages."""
     chat_id = memory.get_setting("owner_chat_id")
     if not chat_id or pref("notifications_enabled", "yes") == "no":
         return  # due items stay due — deferred, not lost, same as quiet hours
     now = datetime.now(TZ)
+    quiet = _quiet(now)
     show_overdue = pref("reminder_overdue_label", "yes") == "yes"
-    for item in memory.due_reminders(now):
-        if _quiet(now) and item["priority"] < 5:
+    cap = pref_int("daily_ping_cap", DAILY_PING_CAP)
+    budget_left = cap - pings_today()
+
+    due = {}  # item_id -> entry, de-duplicated (an item can't fire twice in one tick)
+    for r in memory.due_scheduled_reminders(now):
+        if quiet and r["priority"] < 5:
             continue  # will fire right after quiet hours end
-        d = memory.parse_dt(item["due_at"])
-        when = ""
-        if d:
-            if d < now:
-                when = f" ({icon('⚠️')}overdue)" if show_overdue else ""
-            else:
-                when = f" (due {d.strftime('%a %-I:%M %p')})"
-        nag = item["remind_count"]
-        prefix = f"{icon('⏰')}Reminder" if nag == 0 else f"{icon('⏰')}Nudge #{nag + 1}"
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"{prefix}: {item['title']}{when}",
-                reply_markup=item_buttons(item["id"]),
-            )
-        except Exception:
-            log.exception("failed to send reminder for item %s", item["id"])
+        due[r["id"]] = {"item": r, "kind": "scheduled", "reminder_id": r["reminder_id"]}
+
+    for it in memory.due_nags(now):
+        if it["id"] in due:
             continue
-        interval = escalation_minutes(item["priority"])
-        if interval and nag + 1 < max_nags():
-            nxt = (now + timedelta(minutes=interval)).isoformat(timespec="seconds")
+        if quiet and it["priority"] < 5:
+            continue
+        d = memory.parse_dt(it["due_at"])
+        if d and (now - d).total_seconds() > NAG_WINDOW_HOURS * 3600:
+            # past the chase window: stop nagging, let the morning digest's
+            # stale sweep surface it gently instead of pinging forever
+            memory.update_item(it["id"], next_remind_at=None)
+            continue
+        if it["priority"] < 5 and budget_left <= 0:
+            continue  # daily cap respected for nags (never for scheduled/P5 — see handoff B4)
+        due[it["id"]] = {"item": it, "kind": "nag", "reminder_id": None}
+
+    if not due:
+        return
+    entries = list(due.values())
+
+    try:
+        if len(entries) == 1:
+            await _send_single(context, chat_id, entries[0], show_overdue)
         else:
-            nxt = None
-        memory.update_item(item["id"], next_remind_at=nxt, remind_count=nag + 1)
+            await _send_bundle(context, chat_id, entries, show_overdue)
+    except Exception:
+        log.exception("failed to send reminder(s)")
+        return
+
+    for e in entries:
+        if e["kind"] == "scheduled":
+            memory.mark_reminder_fired(e["reminder_id"])
+        else:
+            it = e["item"]
+            nag = it["remind_count"]
+            interval = escalation_minutes(it["priority"])
+            if interval and nag + 1 < max_nags():
+                nxt = (now + timedelta(minutes=interval)).isoformat(timespec="seconds")
+            else:
+                nxt = None
+            memory.update_item(it["id"], next_remind_at=nxt, remind_count=nag + 1)
+
+
+async def _send_single(context, chat_id, entry: dict, show_overdue: bool):
+    it = entry["item"]
+    text = _reminder_text(entry, show_overdue)
+    # the mute button only makes sense on a repeating nag — a scheduled
+    # reminder is a one-shot moment she asked for, nothing to mute yet
+    markup = item_buttons(it["id"], mute=(entry["kind"] == "nag" and it["remind_count"] >= 1))
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    _log_proactive("reminder", text)
+    _bump_pings(1)
+
+
+async def _send_bundle(context, chat_id, entries: list, show_overdue: bool):
+    lines = [f"{len(entries)} things need you right now:", ""]
+    for idx, e in enumerate(entries, 1):
+        lines.append(f"{idx}. {e['item']['title']}")
+    text = "\n".join(lines)
+    markup = checklist_markup([e["item"] for e in entries], max_buttons=len(entries))
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    _log_proactive("reminder", text)
+    _bump_pings(1)  # one notification event, however many items it covers
 
 
 async def digest_tick(context):
@@ -214,7 +305,21 @@ async def morning_digest(context):
         parts.append("\nYour list is clear.")
     else:
         parts.append(f"\n({len(items)} things safely on the list — say \"list\" anytime.)")
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(parts))
+    text = "\n".join(parts)
+    await context.bot.send_message(chat_id=chat_id, text=text)
+    _log_proactive("digest", text)
+    _bump_pings(1)
+
+    # stale sweep (B3): items whose nag chain gave up (24h+ past due) get one
+    # gentle, guilt-free follow-up with checklist buttons — never re-nagged
+    stale = memory.overdue_stale_items(NAG_WINDOW_HOURS)[:5]
+    if stale:
+        stale_text = "These came and went — clear, or give them a new time?"
+        await context.bot.send_message(
+            chat_id=chat_id, text=stale_text, reply_markup=checklist_markup(stale, max_buttons=len(stale))
+        )
+        _log_proactive("digest", stale_text)
+        _bump_pings(1)
 
 
 async def evening_digest(context):
@@ -235,4 +340,7 @@ async def evening_digest(context):
     if items:
         parts.append(f"\n{len(items)} open item{'s' if len(items) != 1 else ''}, all written down. None of it needs to live in your head tonight.")
     parts.append("\nAnything still in your head, drop it here before bed.")
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(parts))
+    text = "\n".join(parts)
+    await context.bot.send_message(chat_id=chat_id, text=text)
+    _log_proactive("digest", text)
+    _bump_pings(1)

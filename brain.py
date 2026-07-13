@@ -3,6 +3,7 @@ Everything she says flows through respond(); Claude decides what to capture,
 remind, remember, and put on the calendar."""
 import json
 import logging
+import re
 import threading
 from datetime import datetime
 
@@ -95,7 +96,9 @@ happening in the next five minutes is still capture_item (due_at/remind_at are o
 with no specific time), and this applies just as much to a physical item to grab ("AirPods", "the charger") as to \
 a task. There is no such thing as "no tool for this outing right now" or "I only track tasks/plans, not objects" \
 — capture_item's title is free text; a packing reminder is exactly what it's for. Never invent a capability gap \
-that doesn't exist; when in doubt, capture it.
+that doesn't exist; when in doubt, capture it. Never describe something you just saved as "already" on the list \
+or "you mentioned it earlier" — "already" is only for items that demonstrably existed before her current message. \
+You have no memory of things she hasn't told you; never invent a prior mention.
 
 JUDGE: Set priority 1-5 and remind_at yourself — remind at the USEFUL moment (evening before a morning thing, \
 days before a birthday). One clarifying question is allowed — not just for ambiguous timing, but any time a \
@@ -123,16 +126,20 @@ sentences of trade-off, then ONE recommendation. Never shame overdue items: resc
 MEMORY: The items and facts below are the complete permanent record; the chat scroll is windowed. Never say \
 "this is our first chat" or deny prior conversations — answer "what did I tell you" from the state. Store \
 durable personal facts with remember_fact. SHE IS ALWAYS RIGHT about her own life: a correction means the stored \
-fact is wrong — replace it via replaces_fact_id and never repeat or defend the old value.
+fact is wrong — replace it via replaces_fact_id and never repeat or defend the old value. History lines starting \
+[reminder]/[digest]/[email] are scheduled pings YOU sent her — not things she said. If she replies to one \
+("headed to watch fest"), that [reminder] line just above is what she's reacting to.
 
 HER RULES: Style, reminder cadence, quiet hours, digests (time, content, or off entirely), email watching, and \
 "leave me alone for a while" (notifications_enabled — pauses every reminder, digest, and email alert at once, \
 nothing lost, resumes on request) are all hers to set — change them with set_preference and confirm in one \
 sentence. emoji_level and reminder_overdue_label genuinely govern reminders/digests/email alerts, not just this \
-chat — if she wants a specific reminder phrased differently (not just less alarming, an actual custom format), \
-say plainly there's no mechanism for that yet rather than promising it. Style feedback gets stored immediately, \
-permanently. NEVER say something is changed, saved, paused, or turned off without a successful tool call behind \
-it — if no tool covers the request, say so plainly instead of confirming a change that didn't happen.
+chat. Custom reminder wording (E2) is real: set_preference/update_item's reminder_text applies her exact phrasing \
+to every future ping on an item ("0/100 done today" instead of "Reminder: pushups"). daily_ping_cap limits how \
+many proactive pings she gets per day (state block shows pings today: N (cap M)) — if she asks why she got pinged \
+so much, or asks for fewer, set it. Style feedback gets stored immediately, permanently. NEVER say something is \
+changed, saved, paused, or turned off without a successful tool call behind it — if no tool covers the request, \
+say so plainly instead of confirming a change that didn't happen.
 
 KNOWLEDGE: Answer general-knowledge questions confidently (which stores carry what, typical return windows, \
 cooking, travel basics). You have no live internet — share what you know and name the one thing worth verifying; \
@@ -163,11 +170,24 @@ def _tools() -> list:
                     "category": {"type": "string", "enum": ["task", "errand", "shopping", "order", "social", "message", "appointment", "work", "health", "idea", "other"]},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "due_at": {"type": "string", "description": "ISO local datetime deadline, omit if none"},
-                    "remind_at": {"type": "string", "description": "ISO local datetime for the first reminder ping. Omit for no ping (it still shows in daily digests)."},
+                    "remind_at": {
+                        "type": "string",
+                        "description": "ISO local datetime for a reminder ping. For more than one ping on the "
+                        "same item (e.g. night-before + day-of), separate them with ' | ': "
+                        "'2026-07-16T20:30:00 | 2026-07-17T15:00:00'. Omit entirely for no ping (it still shows in daily digests).",
+                    },
                     "recurrence": {
                         "type": "string",
                         "enum": ["daily", "weekly", "monthly", "yearly"],
                         "description": "Set only if she describes something that repeats on its own cycle (a daily habit = daily, rent on the 1st = monthly, car registration every July = yearly, trash night = weekly). Requires due_at. When she checks it off, the next occurrence is created automatically.",
+                    },
+                    "recurrence_until": {
+                        "type": "string",
+                        "description": "ISO date the recurrence series should stop (e.g. she says 'this summer' -> pick a sensible end like late September). Only meaningful with recurrence set; omit for an open-ended series.",
+                    },
+                    "reminder_text": {
+                        "type": "string",
+                        "description": "Her exact custom wording for every future ping on this item, verbatim, instead of the default 'Reminder: {title}' — e.g. she wants pushup pings to say '0/100 done today'.",
                     },
                 },
                 "required": ["title", "category", "priority"],
@@ -193,12 +213,24 @@ def _tools() -> list:
                     "details": {"type": "string"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "due_at": {"type": "string"},
-                    "remind_at": {"type": "string", "description": "next reminder ping, ISO local datetime"},
+                    "remind_at": {
+                        "type": "string",
+                        "description": "Replaces this item's pending pings — one ISO datetime, or several "
+                        "separated by ' | ' for night-before + day-of style reminders.",
+                    },
                     "status": {"type": "string", "enum": ["open", "dropped"]},
                     "recurrence": {
                         "type": "string",
                         "enum": ["none", "daily", "weekly", "monthly", "yearly"],
                         "description": "Set to start/change a repeat cycle, or 'none' to stop it repeating.",
+                    },
+                    "recurrence_until": {
+                        "type": "string",
+                        "description": "ISO date the recurrence series should stop, or empty string to make it open-ended again.",
+                    },
+                    "reminder_text": {
+                        "type": "string",
+                        "description": "Her exact custom wording for every future ping on this item, verbatim, instead of the default template.",
                     },
                 },
                 "required": ["item_id"],
@@ -227,6 +259,7 @@ def _tools() -> list:
                             "nag_interval_p3",
                             "nag_interval_p2",
                             "max_nags",             # pings per item before falling back to digests
+                            "daily_ping_cap",       # soft cap on proactive pings/day (nags + email defer past it; scheduled reminders and P5 always send)
                             "emoji_level",          # none | minimal | normal — applies to scheduled reminders/digests/email alerts too, not just chat replies
                             "reminder_overdue_label", # yes | no — whether reminders/list/digests call a late item "overdue" at all
                             "reply_length",         # short | normal
@@ -307,6 +340,8 @@ def _run_tool(name: str, inp: dict) -> str:
                 due_at=inp.get("due_at"),
                 remind_at=inp.get("remind_at"),
                 recurrence=inp.get("recurrence"),
+                recurrence_until=inp.get("recurrence_until"),
+                reminder_text=inp.get("reminder_text"),
             )
             return f"Saved as item #{item_id}."
         if name == "complete_item":
@@ -314,12 +349,17 @@ def _run_tool(name: str, inp: dict) -> str:
             return "Marked done."
         if name == "update_item":
             fields = {k: v for k, v in inp.items() if k != "item_id"}
-            if "remind_at" in fields:
-                fields["next_remind_at"] = fields.pop("remind_at")
-                fields["remind_count"] = 0
+            remind_at = fields.pop("remind_at", None)
             if fields.get("recurrence") == "none":
                 fields["recurrence"] = None
-            memory.update_item(inp["item_id"], **fields)
+            if fields.get("recurrence_until") == "":
+                fields["recurrence_until"] = None
+            if fields:
+                memory.update_item(inp["item_id"], **fields)
+            if remind_at is not None:
+                # replaces pending pings, not a column on items — see v1.5 split
+                # in scheduler.py (scheduled reminders vs the nag chase)
+                memory.replace_item_reminders(inp["item_id"], remind_at)
             return "Updated."
         if name == "set_preference":
             key, value = inp["key"], str(inp["value"]).strip()
@@ -343,7 +383,7 @@ def _run_tool(name: str, inp: dict) -> str:
                     assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
                 except (ValueError, AssertionError):
                     return "Time must be HH:MM (24h)."
-            if (key.startswith("nag_interval") or key == "max_nags") and not value.isdigit():
+            if (key.startswith("nag_interval") or key in ("max_nags", "daily_ping_cap")) and not value.isdigit():
                 return "Must be a whole number."
             memory.set_setting("pref_" + key, value)
             return f"Preference updated: {key} = {value}."
@@ -379,10 +419,17 @@ def _state_block() -> str:
             bits = [f"#{i['id']} [P{i['priority']}] ({i['category']}) {i['title']}"]
             if i["due_at"]:
                 bits.append(f"due {i['due_at']}")
+            pings = memory.pending_reminder_times(i["id"])
+            if pings:
+                short = [p[5:16].replace("T", " ") for p in pings]  # MM-DD HH:MM
+                bits.append(f"pings {', '.join(short)}")
             if i["next_remind_at"]:
-                bits.append(f"next ping {i['next_remind_at']}")
+                bits.append(f"overdue, next nag {i['next_remind_at']}")
             if i["recurrence"]:
-                bits.append(f"repeats {i['recurrence']}")
+                until = f" until {i['recurrence_until']}" if i["recurrence_until"] else ""
+                bits.append(f"repeats {i['recurrence']}{until}")
+            if i["reminder_text"]:
+                bits.append(f"custom ping text: \"{i['reminder_text']}\"")
             if i["details"]:
                 bits.append(f"— {i['details'][:120]}")
             lines.append(" ".join(bits))
@@ -402,6 +449,7 @@ def _state_block() -> str:
         f"nag cadence P5/P4/P3 = {scheduler.escalation_minutes(5)}/{scheduler.escalation_minutes(4)}/{scheduler.escalation_minutes(3)} min, "
         f"max {scheduler.max_nags()} nags per item, "
         f"reminders call late items 'overdue'={scheduler.pref('reminder_overdue_label', 'yes')}, "
+        f"pings today: {scheduler.pings_today()} (cap {scheduler.pref_int('daily_ping_cap', scheduler.DAILY_PING_CAP)}), "
         f"ALL notifications (reminders/digests/email alerts) {'PAUSED' if scheduler.pref('notifications_enabled', 'yes') == 'no' else 'on'}"
         + (f", gmail watch {'OFF' if scheduler.pref('gmail_watch_enabled', 'yes') == 'no' else 'on'}" if gcal.enabled() else "")
     )
@@ -478,14 +526,40 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 
     captured = []   # item titles saved this turn, for the fallback confirmation
     did = []        # plain-English record of every successful non-capture action
-    for _ in range(10):
+
+    def _execute_tool_calls(blocks) -> list:
+        """Runs every tool_use block, classifies the result into captured/did
+        (closed over), and returns the tool_result content for the next turn."""
+        tool_results = []
+        for block in blocks:
+            if block.type != "tool_use":
+                continue
+            # grab the title before complete_item wipes our chance to name it
+            pre_title = None
+            if block.name in ("complete_item", "update_item"):
+                row = memory.get_item(block.input.get("item_id", -1))
+                pre_title = row["title"] if row else None
+            result = _run_tool(block.name, block.input)
+            ok = not result.startswith(("Tool error", "Unknown", "Invalid"))
+            if block.name == "capture_item" and result.startswith("Saved"):
+                captured.append(block.input.get("title", "item"))
+            elif ok and block.name == "complete_item" and pre_title:
+                did.append(f"checked off \"{pre_title}\"")
+            elif ok and block.name == "update_item" and pre_title:
+                did.append(f"updated \"{pre_title}\"")
+            elif ok and block.name == "set_preference":
+                did.append(f"changed {block.input.get('key','a setting')}")
+            elif ok and block.name == "remember_fact":
+                did.append("saved that to memory")
+            elif ok and block.name.endswith("calendar_event"):
+                did.append("updated the calendar")
+            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+        return tool_results
+
+    def _create(msgs):
         try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=4096,  # a big brain-dump can mean 10+ tool calls in one response
-                system=system,
-                tools=tools,
-                messages=messages,
+            r = client.messages.create(
+                model=model, max_tokens=4096, system=system, tools=tools, messages=msgs,
                 extra_headers={"anthropic-beta": "extended-cache-ttl-2025-04-11"},
             )
         except anthropic.BadRequestError:
@@ -495,36 +569,18 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             for b in system:
                 if isinstance(b, dict) and b.get("cache_control", {}).get("ttl"):
                     b["cache_control"] = {"type": "ephemeral"}
-            resp = client.messages.create(
-                model=model, max_tokens=4096, system=system,
-                tools=tools, messages=messages,
-            )
-        spent = _track_usage(model, resp.usage)
+            r = client.messages.create(model=model, max_tokens=4096, system=system, tools=tools, messages=msgs)
+        nonlocal spent
+        spent = _track_usage(model, r.usage)
+        return r
+
+    spent = today_spend()
+    resp = None
+    for _ in range(10):
+        resp = _create(messages)
         # Execute every complete tool call we got — even if the response was
         # truncated (stop_reason "max_tokens"), partial progress must be saved.
-        tool_results = []
-        for block in resp.content:
-            if block.type == "tool_use":
-                # grab the title before complete_item wipes our chance to name it
-                pre_title = None
-                if block.name in ("complete_item", "update_item"):
-                    row = memory.get_item(block.input.get("item_id", -1))
-                    pre_title = row["title"] if row else None
-                result = _run_tool(block.name, block.input)
-                ok = not result.startswith(("Tool error", "Unknown", "Invalid"))
-                if block.name == "capture_item" and result.startswith("Saved"):
-                    captured.append(block.input.get("title", "item"))
-                elif ok and block.name == "complete_item" and pre_title:
-                    did.append(f"checked off \"{pre_title}\"")
-                elif ok and block.name == "update_item" and pre_title:
-                    did.append(f"updated \"{pre_title}\"")
-                elif ok and block.name == "set_preference":
-                    did.append(f"changed {block.input.get('key','a setting')}")
-                elif ok and block.name == "remember_fact":
-                    did.append("saved that to memory")
-                elif ok and block.name.endswith("calendar_event"):
-                    did.append("updated the calendar")
-                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+        tool_results = _execute_tool_calls(resp.content)
         if not tool_results:
             break
         messages.append({"role": "assistant", "content": resp.content})
@@ -533,6 +589,25 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     log.info("turn: model=%s spend_today=$%.4f", model.split("-")[1], spent)
 
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
+
+    # Empty-promise guard: the model stated a change ("turned off", "saved
+    # that", ...) but made zero tool calls this turn. Give it exactly one
+    # corrective round-trip — either it actually makes the calls now, or it
+    # honestly walks the claim back. This is what tonight's incident was:
+    # Penny said "I've turned off your evening digest" with nothing behind it.
+    if text and not captured and not did and claims_change(text):
+        n = memory.bump_counter("incident_claims")
+        log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:200])
+        messages.append({"role": "assistant", "content": resp.content})
+        messages.append({"role": "user", "content": [{"type": "text", "text": (
+            "(system check: you stated a change but no tool call succeeded this turn. "
+            "Either make the tool calls now and confirm, or restate honestly what you "
+            "could not do — never claim an unexecuted change.)"
+        )}]})
+        resp = _create(messages)
+        _execute_tool_calls(resp.content)
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+
     if not text:
         if captured:
             text = "Got it — " + ", ".join(captured[:8]) + ". All on the list."
@@ -542,6 +617,22 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             text = "That didn't save properly on my end — send it once more?"
     memory.log_msg("assistant", text)
     return text
+
+
+CLAIM_PATTERN = (
+    r"turned off|turned on|i've set|i've moved|i've updated|i've changed|i've paused|"
+    r"now on your list|reminders? (?:is|are)? ?(?:now )?set|on the calendar|checked off|"
+    r"dropped the|saved that"
+)
+_CLAIM_RE = re.compile(CLAIM_PATTERN, re.IGNORECASE)
+
+
+def claims_change(text: str) -> bool:
+    """True if text asserts a behavior/state change happened. Used by the
+    empty-promise guard to catch a claim made with no tool call behind it —
+    deliberately conservative (see CLAIM_PATTERN); false positives just cost
+    one cheap corrective retry, not a wrong answer."""
+    return bool(_CLAIM_RE.search(text))
 
 
 def quick(prompt: str, model: str = None, max_tokens: int = 800) -> str:

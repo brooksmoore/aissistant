@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 from telegram import Update
@@ -80,6 +81,15 @@ Commands (optional — talking works for everything):
 I send a morning game-plan at {MORNING_DIGEST} and an evening check-in at {EVENING_DIGEST}. Reminders keep nudging until you tap ✅ Done — that's the point 😌"""
 
 
+# A bare acknowledgment ("thanks", "ok", "got it", a thumbs-up) needs no brain
+# turn at all — full-match anchored so "ok but move it to 5pm" does NOT match.
+ACK_RE = re.compile(
+    r"^(?:(?:thanks|thank you|thx|ok(?:ay)?|got it|perfect|great)[\s!.,]*(?:👍|🙏|❤️)?\s*"
+    r"|(?:👍|🙏|❤️)+\s*)$",
+    re.IGNORECASE,
+)
+
+
 def _owner() -> str | None:
     return memory.get_setting("owner_chat_id")
 
@@ -146,6 +156,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if chat_id != _owner():
         return  # silently ignore strangers
+
+    # zero-API shortcut: a bare acknowledgment needs no model turn at all
+    if ACK_RE.match(text):
+        memory.log_msg("user", text)
+        memory.log_msg("assistant", "Anytime.")
+        await update.message.reply_text("Anytime.")
+        return
 
     # shortcut: bare "list" renders the tappable checklist
     if text.lower() in ("list", "my list", "show my list", "what's on my list", "whats on my list"):
@@ -226,7 +243,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             memory.complete_item(item["id"])
             await q.answer("Checked off! ✅")
             remaining = memory.open_items()
-            if q.message.text and q.message.text.startswith("📋"):
+            # "Your list" substring, not a leading emoji check — the header icon
+            # is suppressed at emoji_level != normal, which used to make this
+            # branch silently never fire for anyone on the (default) minimal level
+            if q.message.text and "Your list" in q.message.text:
                 # re-render the checklist message in place
                 await q.edit_message_text(
                     scheduler.render_list(remaining),
@@ -237,15 +257,26 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await q.answer("Already gone!")
     elif action == "snooze" and len(parts) == 3:
+        # a fresh one-shot scheduled ping, not a nag-track mutation — snoozing
+        # must not touch remind_count/next_remind_at (those are reserved for
+        # the overdue nag chase; see scheduler.py's v1.5 module docstring)
         nxt = (datetime.now(TZ) + timedelta(minutes=int(parts[2]))).isoformat(timespec="seconds")
-        memory.update_item(int(parts[1]), next_remind_at=nxt)
+        memory.add_reminder(int(parts[1]), nxt)
         await q.answer("Snoozed ⏰")
         await q.edit_message_text(f"{q.message.text}\n\n⏰ Snoozed — I'll circle back in an hour.")
     elif action == "tmrw" and len(parts) == 2:
         tomorrow9 = datetime.now(TZ).replace(hour=9, minute=0, second=0) + timedelta(days=1)
-        memory.update_item(int(parts[1]), next_remind_at=tomorrow9.isoformat(timespec="seconds"))
+        memory.add_reminder(int(parts[1]), tomorrow9.isoformat(timespec="seconds"))
         await q.answer("Moved to tomorrow 🌙")
         await q.edit_message_text(f"{q.message.text}\n\n🌙 Parked until tomorrow morning. Sleep easy.")
+    elif action == "mute" and len(parts) == 2:
+        item_id = int(parts[1])
+        memory.update_item(item_id, next_remind_at=None)
+        memory.delete_unfired_reminders(item_id)
+        await q.answer("Muted 🔕")
+        await q.edit_message_text(
+            f"{q.message.text}\n\n🔕 No more pings for this — it stays on your list and in digests."
+        )
     else:
         await q.answer()
 
