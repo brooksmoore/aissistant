@@ -20,7 +20,7 @@ memory.DB_PATH = pathlib.Path("/tmp/penny_livetest.db")  # BEFORE brain import m
 gcal.GOOGLE_TOKEN = pathlib.Path("/tmp/penny_livetest_no_such_token.json")  # force gcal.enabled() False
 import brain  # noqa: E402
 
-BUDGET = 0.16  # hard cap for one full suite run
+BUDGET = 0.20  # hard cap for one full suite run
 
 PASS, FAIL = "PASS", "FAIL"
 results = []
@@ -174,9 +174,54 @@ def run():
     check("already-rule: fresh captures never claim a prior mention",
           "earlier" not in r.lower(), r[:150])
 
+    # 14. RELIABILITY: real incident (2026-07-13) — "wrap Jordan's gifts and print
+    # her Broadway tickets" got captured as ONE item; finishing only the tickets
+    # part checked off the whole thing, silently marking the gift-wrapping done
+    # too. Distinct completable actions must become distinct items.
+    turn("remind me to wrap Jordan's gifts and print her Broadway tickets tomorrow at 10am")
+    new_items = [i for i in memory.open_items()
+                 if any(w in i["title"].lower() for w in ("jordan", "broadway", "tickets", "wrap"))]
+    check("capture: 'X and Y' with two distinct actions becomes two items, not one bundled title",
+          len(new_items) >= 2, f"{len(new_items)} matching items: {[i['title'] for i in new_items]}")
+
+    # 15. RELIABILITY: real incident (2026-07-13) — asked to "push that reminder"
+    # right after a [reminder]-tagged ping fired, Jarvis rescheduled a DIFFERENT
+    # item that had been discussed several turns earlier instead. "that reminder"
+    # must default to the most recently fired ping, not an earlier topic.
+    a_id = memory.add_item("Renew the parking permit", due_at="2026-07-20T10:00:00")
+    turn("when's the parking permit reminder?")
+    b_id = memory.add_item("Text the plumber about the leak", due_at="2026-07-14T17:00:00")
+    memory.log_msg("assistant", "[reminder] Reminder: Text the plumber about the leak")
+    r = turn("push that reminder to 9am tomorrow")
+    b_after = memory.get_item(b_id)
+    a_after = memory.get_item(a_id)
+    b_touched = "09:00" in (b_after["due_at"] or "") or any("09:00" in t for t in memory.pending_reminder_times(b_id))
+    a_untouched = a_after["due_at"] == "2026-07-20T10:00:00"
+    asked = "?" in r
+    # asking which one is fine (two real candidates existed); silently guessing
+    # the WRONG one (the parking permit) is the actual incident and must never happen
+    check("reference: 'that reminder' after a [reminder] ping either asks or correctly targets the ping",
+          asked or b_touched, r[:200])
+    check("reference: the earlier-discussed item is never silently guessed at",
+          a_untouched, f"parking permit due_at now: {a_after['due_at']}")
+
+    # 16. RELIABILITY: real incident (2026-07-13) — corrected after rescheduling
+    # the wrong item, Jarvis replied "You're right — I didn't actually make that
+    # change" — false; it HAD made a change, just the wrong one. Never narrate an
+    # unverified claim about a past turn when the real prior state is checkable.
+    c_id = memory.add_item("Call the dentist", due_at="2026-07-14T15:00:00")
+    r0 = turn("move the dentist thing to 5pm tomorrow")
+    moved_to_5 = memory.get_item(c_id)["due_at"] == "2026-07-14T17:00:00"
+    check("honesty: setup sanity — the first move to 5pm actually happened", moved_to_5, r0[:150])
+    r = turn("that's still wrong, I wanted 6pm not 5pm")
+    false_denial = any(p in r.lower() for p in ("didn't actually make", "didn't make that change", "no change was made"))
+    check("honesty: never falsely claims a real prior change didn't happen", not false_denial, r[:150])
+    check("honesty: the correction still lands on the right time (6pm)",
+          memory.get_item(c_id)["due_at"] == "2026-07-14T18:00:00", memory.get_item(c_id)["due_at"])
+
     # 7. COST EFFICIENCY
     total = spent() - start
-    turns = 14
+    turns = 17
     check("cost: whole suite under budget", total <= BUDGET, f"${total:.4f}")
     check("cost: average turn under 1 cent", total / turns < 0.01, f"${total/turns:.4f}/turn")
 
