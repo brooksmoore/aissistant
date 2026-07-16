@@ -5,6 +5,7 @@ instances/
 google_credentials.json
 google_token.json
 .env
+heartbeat_state.txt
 
 # machine junk
 venv/
