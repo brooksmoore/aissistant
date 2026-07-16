@@ -245,6 +245,9 @@ def open_items() -> list:
         ).fetchall()
 
 
+NAG_FIRST_GRACE_MINUTES = 5  # see due_nags() — keeps a same-time reminder+nag from stacking
+
+
 def due_nags(now: datetime) -> list:
     """Open items whose due_at has passed and are due for another nag ping —
     the repeating 'still not done' chase. Separate from one-shot scheduled
@@ -269,6 +272,14 @@ def due_nags(now: datetime) -> list:
             continue
         if r["remind_count"] > 0 and not r["next_remind_at"]:
             continue  # nagging was deliberately stopped — never re-select
+        # a scheduled reminder is often set for the exact due moment — without
+        # a short grace window, the very next minute's tick already sees the
+        # item as "overdue" and fires the first nag seconds later, doubling up
+        # on the scheduled ping (confirmed live: reminder at 12:00, Nudge #1 at
+        # 12:01 for the same item). Only the very first nag needs this pause —
+        # once remind_count>0 the item is already paced by next_remind_at.
+        if r["remind_count"] == 0 and (now - d).total_seconds() < NAG_FIRST_GRACE_MINUTES * 60:
+            continue
         nxt = parse_dt(r["next_remind_at"])
         if nxt and nxt > now:
             continue  # already nagged, waiting for the next escalation interval

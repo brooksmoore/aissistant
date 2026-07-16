@@ -51,6 +51,14 @@ QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "22"))  # no pings after th
 QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "8"))       # ...until this (priority-5 excepted)
 EMAIL_POLL_MINUTES = int(os.getenv("EMAIL_POLL_MINUTES", "15"))
 
+# --- Siri Shortcut / LAN capture webhook ---
+# OFF by default: the listener only starts if WEBHOOK_SECRET is set, so an
+# existing install never gains a new network surface without opting in.
+# Two instances on the same Mac need distinct ports — set WEBHOOK_PORT
+# explicitly per instance if you enable this on more than one.
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8765"))
+
 # --- files ---
 DB_PATH = INSTANCE_DIR / "assistant.db"
 GOOGLE_CREDS = INSTANCE_DIR / "google_credentials.json"

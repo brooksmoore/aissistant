@@ -23,6 +23,7 @@ import maintenance
 import memory
 import scheduler
 import voice
+import webhook
 from config import (
     INSTANCE,
     INSTANCE_DIR,
@@ -346,6 +347,7 @@ def main():
         log.info("gmail/calendar: not connected yet (run setup_google.py to enable)")
 
     voice.warmup()  # download/load the transcription model before her first voice note
+    webhook.maybe_start()  # LAN capture endpoint for Shortcuts/Siri — off unless configured
     log.info("%s is up. Waiting for messages…", ASSISTANT_NAME)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

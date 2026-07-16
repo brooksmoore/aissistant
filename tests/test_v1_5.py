@@ -293,13 +293,36 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
     def test_fresh_overdue_item_still_nags_once_with_zero_remind_count(self):
         """The fix must not overcorrect: remind_count=0 + next_remind_at=NULL is
         the normal state of an item that just became overdue and has never been
-        nagged — it must still fire its first nag."""
+        nagged — it must still fire its first nag once past the grace window."""
         now = datetime.now(config.TZ)
-        past = (now - timedelta(minutes=5)).isoformat(timespec="seconds")
+        past = (now - timedelta(minutes=10)).isoformat(timespec="seconds")
         i = memory.add_item("freshly overdue", due_at=past, priority=3)
         memory.delete_unfired_reminders(i)
         self.assertEqual(memory.get_item(i)["remind_count"], 0)
         self.assertIsNone(memory.get_item(i)["next_remind_at"])
+        due = memory.due_nags(now)
+        self.assertEqual([d["id"] for d in due], [i])
+
+    def test_first_nag_waits_out_a_grace_period_after_due_at(self):
+        """Real incident (2026-07-16, jarvis): a scheduled reminder set for the
+        exact due moment fired at 12:00, and the very next tick already saw the
+        item as overdue and fired 'Nudge #1' at 12:01 — two pings for one thing,
+        a minute apart. The first-ever nag must wait a few minutes past due_at."""
+        now = datetime.now(config.TZ)
+        just_past = (now - timedelta(minutes=1)).isoformat(timespec="seconds")
+        i = memory.add_item("reminder and due_at coincide", due_at=just_past, priority=3)
+        memory.delete_unfired_reminders(i)
+        self.assertEqual(memory.due_nags(now), [])  # too soon — still in the grace window
+
+    def test_grace_period_only_applies_to_the_first_nag(self):
+        """Once a chase is already underway (remind_count>0), next_remind_at is
+        what paces it — the grace window must not re-delay an ongoing chase."""
+        now = datetime.now(config.TZ)
+        just_past = (now - timedelta(minutes=1)).isoformat(timespec="seconds")
+        long_past_next = (now - timedelta(minutes=1)).isoformat(timespec="seconds")
+        i = memory.add_item("already mid-chase", due_at=just_past, priority=3)
+        memory.delete_unfired_reminders(i)
+        memory.update_item(i, remind_count=1, next_remind_at=long_past_next)
         due = memory.due_nags(now)
         self.assertEqual([d["id"] for d in due], [i])
 

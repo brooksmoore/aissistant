@@ -639,18 +639,34 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     # corrective round-trip — either it actually makes the calls now, or it
     # honestly walks the claim back. This is what tonight's incident was:
     # Penny said "I've turned off your evening digest" with nothing behind it.
+    #
+    # Real incident (2026-07-16, jarvis): she asked a plain diagnostic
+    # question ("why did you nudge me a minute after the initial reminder?"),
+    # the model's accurate explanatory answer ("I made an error sending that
+    # second ping so quickly") tripped this guard, and the ONLY two outcomes
+    # this prompt used to offer — "do something" or "admit you couldn't" —
+    # left no room for the actually-correct third answer: nothing needed
+    # fixing, she just asked what happened. Forced to pick one of two, the
+    # model invented an update_item call and silently moved a real due date
+    # a full day out. The corrective prompt now explicitly allows "just
+    # explain, no action needed" as a valid outcome.
     if text and not captured and not did and (claims_change(text) or llm_claims_change(text)):
         n = memory.bump_counter("incident_claims")
-        log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:200])
+        log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:600])
         messages.append({"role": "assistant", "content": resp.content})
         messages.append({"role": "user", "content": [{"type": "text", "text": (
             "(automated system check, not a message from her — she has not seen your "
-            "last reply yet and did not correct you: you stated a change but no tool call "
-            "succeeded this turn. Silently make the correct tool call(s) now and reply to "
-            "her as your first and only response — do not say 'you're right', don't "
-            "reference this check, don't apologize for a mistake she hasn't seen. If you "
-            "genuinely cannot do it, state that plainly instead of claiming success — "
-            "but still phrase it as your one and only reply to her, not a correction.)"
+            "last reply yet and did not correct you: your last reply reads like it's "
+            "claiming a change happened, but no tool call succeeded this turn. Look at "
+            "what she actually asked. Three honest outcomes are possible, pick whichever "
+            "is true: (1) something genuinely needs doing — make the real tool call(s) "
+            "now and confirm; (2) you can't do it — say so plainly; (3) nothing actually "
+            "needed fixing — she asked a question, not for a change, and your wording "
+            "just sounded like a claim. In case (3), do NOT invent a tool call to have "
+            "something to point to — just answer her question accurately with no action "
+            "at all. Whichever it is, do not say 'you're right', don't reference this "
+            "check, don't apologize for a mistake she hasn't actually raised — reply as "
+            "your first and only response to her.)"
         )}]})
         resp = _create(messages)
         _execute_tool_calls(resp.content)

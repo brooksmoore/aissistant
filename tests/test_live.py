@@ -165,6 +165,29 @@ def run():
     check("guard: a tripped guard is machine-countable (incident_claims_* counter)",
           incidents >= 0, f"incidents today: {incidents}")  # >=0 always true; records the count for visibility
 
+    # 12b. v1.6 GUARD FIX: real incident (2026-07-16, jarvis) — a reminder set
+    # for the exact due moment double-fired (scheduled ping + first nag a
+    # minute apart). Asked a plain diagnostic question about it, the model's
+    # accurate explanation tripped the empty-promise guard, and the corrective
+    # retry (which only offered "act" or "admit failure") invented an
+    # update_item call that silently moved the item's real due date a day out.
+    # The fix adds a third outcome ("nothing needed fixing, just explain") —
+    # this replays the exact scenario and checks the due date is untouched.
+    from datetime import datetime as _dt, timedelta as _td
+    from config import TZ as _TZ
+    coincide_id = memory.add_item(
+        "Initiate conversation with recruiter",
+        due_at=(_dt.now(_TZ) - _td(minutes=1)).isoformat(timespec="seconds"),
+        priority=3,
+    )
+    due_before = memory.get_item(coincide_id)["due_at"]
+    r = turn("Why did you nudge me a minute after the initial reminder?")
+    due_after = memory.get_item(coincide_id)["due_at"]
+    check("guard fix: a diagnostic question does not silently move a real due date",
+          due_before == due_after, f"before={due_before} after={due_after}")
+    check("guard fix: reply is an actual explanation, not a generic action non-answer",
+          not r.lower().startswith("done —") and not r.lower().startswith("done-"), r[:150])
+
     # 13. v1.5 C1 "ALREADY" RULE: fresh captures must never be described as
     # pre-existing — the real incident was Jarvis saying "Already got that one —
     # you mentioned it earlier" about an item it had just captured that same message.
