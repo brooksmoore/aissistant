@@ -199,6 +199,48 @@ class TestBundlingAndPingBudget(unittest.TestCase):
         rows = memory.recent_msgs(5)
         self.assertTrue(any(r["content"].startswith("[reminder]") for r in rows))
 
+    def test_bundle_gives_each_item_its_own_full_button_row(self):
+        # a bundle must stay one message/one notification, but each item still
+        # gets real actions (Done/+1h/Tomorrow) instead of a bare checkmark —
+        # what you can do with a reminder shouldn't depend on how many fired
+        # at the same minute
+        self._due_item("thing one")
+        self._due_item("thing two")
+        ctx = FakeContext()
+        run(self.scheduler.check_reminders(ctx))
+        self.assertEqual(len(ctx.bot.sent), 1)
+        rows = ctx.bot.sent[0]["reply_markup"].inline_keyboard
+        self.assertEqual(len(rows), 2)  # one row per item
+        for row in rows:
+            labels = [b.text for b in row]
+            self.assertIn("✅ Done", labels)
+            self.assertIn("⏰ +1h", labels)
+            self.assertIn("🌙 Tomorrow", labels)
+
+
+class TestEventCategoryButtons(unittest.TestCase):
+    """A fixed-time event (trivia, a dinner reservation) can't be snoozed an
+    hour or pushed to tomorrow the way an open-ended task can."""
+
+    def setUp(self):
+        fresh_db()
+        import scheduler
+        self.scheduler = scheduler
+
+    def test_task_gets_full_button_row(self):
+        row = self.scheduler.item_button_row(1, category="task")
+        labels = [b.text for b in row]
+        self.assertIn("⏰ +1h", labels)
+        self.assertIn("🌙 Tomorrow", labels)
+
+    def test_social_and_appointment_items_get_done_only(self):
+        for cat in ("social", "appointment"):
+            row = self.scheduler.item_button_row(1, category=cat)
+            labels = [b.text for b in row]
+            self.assertIn("✅ Done", labels)
+            self.assertNotIn("⏰ +1h", labels)
+            self.assertNotIn("🌙 Tomorrow", labels)
+
 
 class TestNagCutoffAndStaleSweep(unittest.TestCase):
     def setUp(self):
@@ -208,6 +250,7 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
         memory.set_setting("owner_chat_id", "12345")
         memory.set_setting("pref_quiet_start_hour", "0")
         memory.set_setting("pref_quiet_end_hour", "0")
+        memory.set_setting("pref_digest_style", "plain")  # unit suite is zero-API: exercise the plain build
 
     def test_nag_stops_after_window_and_clears_next_remind_at(self):
         now = datetime.now(config.TZ)
@@ -287,18 +330,105 @@ class TestSpareEnergySection(unittest.TestCase):
         import scheduler
         self.scheduler = scheduler
         memory.set_setting("owner_chat_id", "12345")
+        memory.set_setting("pref_digest_style", "plain")  # unit suite is zero-API: exercise the plain build
 
-    def test_social_and_appointment_items_excluded_from_spare_energy(self):
+    def test_dated_items_excluded_from_spare_energy_regardless_of_category(self):
+        # any item with a specific future due_at can't be done early no matter
+        # the category — a "task" tied to a future date (e.g. "ask boss to
+        # leave early for Tuesday's movie") is just as undoable today as a
+        # dinner reservation. Only truly undated backlog belongs here.
         future = "2099-01-01T19:00:00"
         memory.add_item("Dinner with Jordan and her parents", due_at=future, category="social")
         memory.add_item("Doctor appointment", due_at=future, category="appointment")
-        memory.add_item("Write Jordan a birthday card", due_at=future, category="task")
+        memory.add_item("Ask boss to leave early for movie", due_at=future, category="work")
+        memory.add_item("Write Jordan a birthday card", due_at=None, category="task")
         ctx = FakeContext()
         run(self.scheduler.morning_digest(ctx))
         text = ctx.bot.sent[0]["text"]
         self.assertIn("Write Jordan a birthday card", text)
         self.assertNotIn("Dinner with Jordan", text)
         self.assertNotIn("Doctor appointment", text)
+        self.assertNotIn("Ask boss to leave early", text)
+
+
+class TestSmartDigestFallback(unittest.TestCase):
+    """digest_style=smart must NEVER be able to lose a digest: any failure in
+    compose_digest falls back to the plain f-string build, and digest_style=
+    plain opts out of the model call entirely."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        import scheduler
+        self.brain, self.scheduler = brain, scheduler
+        memory.set_setting("owner_chat_id", "12345")
+
+    def test_smart_digest_used_when_compose_succeeds(self):
+        memory.add_item("write the card", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
+        orig = self.brain.compose_digest
+        self.brain.compose_digest = lambda: "Card first, then the day is yours."
+        try:
+            ctx = FakeContext()
+            run(self.scheduler.morning_digest(ctx))
+        finally:
+            self.brain.compose_digest = orig
+        self.assertIn("Card first", ctx.bot.sent[0]["text"])
+        self.assertIn("Morning!", ctx.bot.sent[0]["text"])  # header still ours
+
+    def test_plain_fallback_when_compose_returns_none(self):
+        memory.add_item("write the card", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
+        orig = self.brain.compose_digest
+        self.brain.compose_digest = lambda: None
+        try:
+            ctx = FakeContext()
+            run(self.scheduler.morning_digest(ctx))
+        finally:
+            self.brain.compose_digest = orig
+        text = ctx.bot.sent[0]["text"]
+        self.assertIn("write the card", text)  # plain build shipped instead
+        self.assertIn("Needs you today", text)
+
+    def test_digest_style_plain_never_calls_compose(self):
+        memory.set_setting("pref_digest_style", "plain")
+        memory.add_item("write the card", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
+        orig = self.brain.compose_digest
+        self.brain.compose_digest = lambda: (_ for _ in ()).throw(AssertionError("must not be called"))
+        try:
+            ctx = FakeContext()
+            run(self.scheduler.morning_digest(ctx))
+        finally:
+            self.brain.compose_digest = orig
+        self.assertIn("write the card", ctx.bot.sent[0]["text"])
+
+
+class TestDigestDoesNotSilentlyDropDueItems(unittest.TestCase):
+    """Real incident (2026-07-14, jarvis): a hardcoded [:6] cutoff on "needs you
+    today" dropped two genuinely-due items (call Riley, text Casey) with
+    no indication anything was missing — Brooks had to notice and ask why."""
+
+    def setUp(self):
+        fresh_db()
+        import scheduler
+        self.scheduler = scheduler
+        memory.set_setting("owner_chat_id", "12345")
+        memory.set_setting("pref_digest_style", "plain")  # unit suite is zero-API: exercise the plain build
+
+    def _due_today(self, title, hour):
+        now = datetime.now(config.TZ)
+        due = now.replace(hour=hour, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+        memory.add_item(title, due_at=due, priority=3)
+
+    def test_more_than_eight_due_items_all_named_or_counted(self):
+        for h in range(9, 19):  # 10 items due today, same priority
+            self._due_today(f"task {h}", h)
+        ctx = FakeContext()
+        run(self.scheduler.morning_digest(ctx))
+        text = ctx.bot.sent[0]["text"]
+        # the first 8 (by due time) are named outright
+        for h in range(9, 17):
+            self.assertIn(f"task {h}", text)
+        # the rest are surfaced by count, not silently dropped
+        self.assertIn("+2 more", text)
 
 
 class TestMuteButtonDBEffect(unittest.TestCase):
@@ -342,6 +472,11 @@ class TestEmptyPromiseGuardPatternMatcher(unittest.TestCase):
             "Checked off the dentist thing.",
             "Dropped the birthday item.",
             "Saved that to memory.",
+            # live miss 2026-07-16: capture-confirmation phrasing with nothing
+            # captured behind it — the guard never runs when a real capture
+            # exists, so these matching can only ever catch empty promises
+            "Got it: bring AirPods and Jordan's crossover bag.",
+            "Noted — I'll keep that in mind.",
         ]
         for text in claims:
             with self.subTest(text=text):

@@ -112,8 +112,10 @@ modify her email).
      Haiku; Sonnet fires only for decisions, planning, drafting, or photos.
   2. **Prompt caching**: the big static prompt is cached (~90% off input tokens during a
      back-and-forth conversation).
-  3. **Daily breaker**: past `DAILY_BUDGET_USD` (default $0.25) everything falls back to
-     Haiku — she never loses service, it just gets cheaper.
+  3. **Daily breaker**: past `DAILY_BUDGET_USD` (default $0.20) everything falls back to
+     Haiku — she never loses service, it just gets cheaper. Past `HARD_CAP_USD` (default
+     $0.25) API calls stop entirely until midnight; reminders, buttons, and plain-text
+     digests keep working free.
   - Want all-Haiku (max savings, slightly weaker "help me decide" moments)? One line in
     `.env`: `BRAIN_MODEL=claude-haiku-4-5-20251001`
 - Expected: **~$0.02–0.05/day** with normal use (measured ~quarter to half a cent per

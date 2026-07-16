@@ -38,7 +38,11 @@ TZ = ZoneInfo(TIMEZONE)
 BRAIN_MODEL = os.getenv("BRAIN_MODEL", "claude-sonnet-5")          # deep-thinking turns
 CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")  # everyday turns + email triage
 SMART_ROUTING = os.getenv("SMART_ROUTING", "1") == "1"  # Haiku for routine turns, Sonnet only when thinking is needed
-DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0.10"))  # soft breaker: past this, everything runs on Haiku
+DAILY_BUDGET_USD = float(os.getenv("DAILY_BUDGET_USD", "0.20"))  # soft breaker: past this, everything runs on Haiku
+# Hard stop: past this, NOTHING calls the API until midnight (reminders/buttons/
+# digest-fallbacks keep working free). Its own knob, not a multiple of the soft
+# breaker — raising one must not silently move the other.
+HARD_CAP_USD = float(os.getenv("HARD_CAP_USD", "0.25"))
 
 # --- schedule (24h HH:MM, local time) ---
 MORNING_DIGEST = os.getenv("MORNING_DIGEST", "08:00")

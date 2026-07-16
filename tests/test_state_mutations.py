@@ -197,6 +197,7 @@ VALID_VALUES = {
     "digest_show_completed": "no",
     "reminder_overdue_label": "no",
     "daily_ping_cap": "5",
+    "digest_style": "plain",
 }
 INVALID_VALUES = {
     "reminder_style": "aggressive",
@@ -218,6 +219,7 @@ INVALID_VALUES = {
     "digest_show_completed": "sure",
     "reminder_overdue_label": "sure",
     "daily_ping_cap": "many",
+    "digest_style": "fancy",
 }
 
 

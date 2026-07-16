@@ -11,7 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 import memory
-from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
+from config import CLASSIFIER_MODEL, HARD_CAP_USD, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
 from scheduler import icon, pref
 
 log = logging.getLogger("penny.maintenance")
@@ -104,7 +104,7 @@ Reply with ONLY a JSON array, nothing else:
 def fact_maintenance():
     import brain  # deferred: brain imports memory, avoid an import cycle at module load
 
-    if brain.today_spend() >= 3 * DAILY_BUDGET_USD:
+    if brain.today_spend() >= HARD_CAP_USD:
         log.warning("skipping fact maintenance: daily hard cap already reached")
         return
     facts = memory.all_facts()
@@ -151,9 +151,40 @@ def _stale_digest_text() -> str | None:
     return "\n".join(lines)
 
 
+PATTERN_REVIEW_PROMPT = """{state}
+
+Based on these items (statuses, due dates, categories, how long things have \
+been open), write at most 4 short bullets of genuinely useful observations for \
+the owner's Sunday review: what keeps sliding, what reliably gets done, one \
+concrete suggestion grounded in the data. Plain text bullets ("• "), no \
+headers, no flattery, no invented details. If the data is too thin to say \
+anything real, reply with exactly NONE."""
+
+
+def _pattern_review_text() -> str | None:
+    """One weekly Haiku pass over her items for pattern insights ("Jordan tasks
+    cluster and slip together"). Returns None on any failure, thin data, or
+    budget stop — the weekly message just goes out without it."""
+    import brain  # deferred: brain imports memory; avoid an import cycle at module load
+
+    if brain.today_spend() >= HARD_CAP_USD:
+        return None
+    if len(memory.open_items()) + len(memory.completed_today()) < 5:
+        return None  # not enough signal to say anything worth a bullet
+    try:
+        text = brain.quick(PATTERN_REVIEW_PROMPT.format(state=brain._state_block()), max_tokens=250)
+    except Exception:
+        log.exception("weekly pattern review failed (skipping)")
+        return None
+    if not text or text.strip().upper().startswith("NONE") or len(text) > 800:
+        return None
+    return f"{icon('🧭')}This week's patterns:\n{text}"
+
+
 async def weekly_tick(context):
     """Runs hourly; fires once per ISO week, Sunday evening: surfaces stale
-    items to her, then quietly tidies up facts in the background."""
+    items and week-level patterns to her, then quietly tidies up facts in
+    the background."""
     now = datetime.now(TZ)
     this_week = now.strftime("%G-W%V")
     if memory.get_setting("last_weekly_review") == this_week:
@@ -163,14 +194,22 @@ async def weekly_tick(context):
     memory.set_setting("last_weekly_review", this_week)
 
     chat_id = memory.get_setting("owner_chat_id")
-    text = _stale_digest_text()
+    stale_text = _stale_digest_text()
+    patterns = await asyncio.to_thread(_pattern_review_text)  # Claude call off the event loop
+    text = "\n\n".join(p for p in (stale_text, patterns) if p)
     # notifications_enabled only silences the PING — fact tidy-up below still
     # runs regardless, since it's silent housekeeping, not a message to her
     if chat_id and text and pref("notifications_enabled", "yes") != "no":
         try:
             await context.bot.send_message(chat_id=chat_id, text=text)
+            # tally + log like every other proactive send (v1.5 rule) — was
+            # silently missed here before, hiding this ping from the brain
+            # and from the pings_* budget accounting
+            from scheduler import _bump_pings, _log_proactive
+            _log_proactive("digest", text)
+            _bump_pings(1)
         except Exception:
-            log.exception("stale-item digest failed to send")
+            log.exception("weekly review message failed to send")
 
     try:
         await asyncio.to_thread(fact_maintenance)  # Claude call off the event loop

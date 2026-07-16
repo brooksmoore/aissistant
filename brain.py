@@ -18,6 +18,7 @@ from config import (
     BRAIN_MODEL,
     CLASSIFIER_MODEL,
     DAILY_BUDGET_USD,
+    HARD_CAP_USD,
     EVENING_DIGEST,
     MORNING_DIGEST,
     QUIET_END_HOUR,
@@ -161,7 +162,11 @@ TIME: Resolve every relative date against the current datetime below to explicit
 calendar tools are present, put anything with a fixed time on the real calendar (item = to-do, event = time block). \
 When answering "what's on my calendar/list" for a day or range, a general fact (a routine, a usual day off) NEVER \
 replaces or hides a specific item due that day — check every open item against the range and merge them in; a day \
-with both a routine fact and a due item must mention the item, not just the routine.
+with both a routine fact and a due item must mention the item, not just the routine. If she asks why something \
+isn't on "today's" list, a digest you sent earlier is a trimmed summary, not the source of truth — a morning \
+digest only shows the first several due items by design and can genuinely omit real ones. Always recompute the \
+answer from each item's own `due` date in the state below; never conclude an item is scheduled for a different \
+day just because a previous digest message didn't mention it.
 
 Item [#] and fact [f#] IDs below are real — use them for complete_item / update_item / replaces_fact_id. Items \
 you captured earlier this conversation appear below: your own work, not duplicates. "What's on my list" → \
@@ -276,6 +281,7 @@ def _tools() -> list:
                             "reminder_overdue_label", # yes | no — whether reminders/list/digests call a late item "overdue" at all
                             "reply_length",         # short | normal
                             "digest_show_completed", # yes | no — list finished items in the evening digest
+                            "digest_style",         # smart | plain — smart: model-written morning plan with conflict warnings; plain: simple list
                         ],
                     },
                     "value": {"type": "string"},
@@ -381,6 +387,8 @@ def _run_tool(name: str, inp: dict) -> str:
                 return "emoji_level must be none, minimal, or normal."
             if key == "reply_length" and value not in ("short", "normal"):
                 return "reply_length must be short or normal."
+            if key == "digest_style" and value not in ("smart", "plain"):
+                return "digest_style must be smart or plain."
             if key == "digest_show_completed" and value not in ("yes", "no"):
                 return "digest_show_completed must be yes or no."
             if key.endswith("_digest_enabled") and value not in ("yes", "no"):
@@ -421,7 +429,11 @@ def _run_tool(name: str, inp: dict) -> str:
 
 
 def _state_block() -> str:
-    now = datetime.now(TZ)
+    """Items/facts/prefs/calendar — everything EXCEPT the current timestamp, so
+    this block is byte-identical between two turns where nothing changed and
+    can carry its own cache breakpoint. The timestamp changes every single
+    turn by definition; folding it in here used to bust that cache on every
+    message (see respond()'s cache_control comment)."""
     facts = memory.all_facts()[-60:]  # cap: facts accumulate for years; keep prompt bounded
     facts_txt = "\n".join(f"- [f{f['id']}] {f['content']}" for f in facts) or "(nothing yet — she's new; learn her name early)"
     items = memory.open_items()[:40]
@@ -467,12 +479,21 @@ def _state_block() -> str:
     )
     return (
         f"\n--- CURRENT STATE ---\n"
-        f"Now: {now.strftime('%A, %B %d, %Y at %I:%M %p')} ({TIMEZONE})\n\n"
         f"What you know about her:\n{facts_txt}\n\n"
         f"Her open items:\n{items_txt}\n\n"
         f"Her calendar (next 7 days):\n{cal_txt}\n\n"
         f"Your current behavior settings: {prefs_txt}\n"
     )
+
+
+def _now_line() -> str:
+    """The one genuinely-volatile line, split out of _state_block() so that
+    block can cache-hit across turns where nothing else changed. Kept as its
+    own tiny, uncached system block placed AFTER the state block's breakpoint
+    — its content changes every turn, but at one short line the cost of
+    resending it fresh is negligible next to resending the whole state block."""
+    now = datetime.now(TZ)
+    return f"Now: {now.strftime('%A, %B %d, %Y at %I:%M %p')} ({TIMEZONE})"
 
 
 def _history() -> list:
@@ -507,7 +528,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             {"type": "text", "text": str(last["content"])},
         ]
 
-    if today_spend() >= 3 * DAILY_BUDGET_USD:
+    if today_spend() >= HARD_CAP_USD:
         # True hard cap: no API call at all. Reminders, buttons, and digests
         # keep working (they never use the API); only conversation rests.
         text = ("I've used up my thinking budget for today, so I'm resting until midnight — "
@@ -518,11 +539,11 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 
     model = pick_model(user_text, has_image=bool(image_b64))
     tools = _tools()
-    # Second cache breakpoint on the newest history message. The state block sits
-    # between the cached personality and the messages, so this entry only survives
-    # within one turn — which is exactly where it pays: a multi-tool brain-dump
-    # re-reads the whole prefix once per tool round-trip. Default 5m TTL (a 1h TTL
-    # here just doubles the write premium on an entry the next turn invalidates).
+    # Third cache breakpoint on the newest history message. Default 5m TTL (a
+    # 1h TTL here just doubles the write premium on an entry the next turn
+    # invalidates) — this one pays off within a single multi-tool round-trip
+    # (see below) and, when the state block also hits, across close-together
+    # turns too (see the state-block breakpoint's comment).
     if len(messages) > 1 and isinstance(messages[-1]["content"], str):
         messages[-1]["content"] = [
             {"type": "text", "text": messages[-1]["content"], "cache_control": {"type": "ephemeral"}}
@@ -531,9 +552,20 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     # input cost on hits). The state block is computed ONCE per turn: recomputing it
     # inside the tool loop changed the prompt prefix every iteration (minute timestamp,
     # freshly captured items) and busted the intra-turn cache on every round-trip.
+    #
+    # The state block gets its own breakpoint too. Anthropic's cache match is
+    # prefix-based: a breakpoint only hits if EVERYTHING before it is
+    # byte-identical to a prior cached request. The state block used to open
+    # with a to-the-minute "Now: ..." line, which meant it — and everything
+    # cached after it — differed on literally every single turn, so no turn
+    # ever benefited from caching beyond the personality block alone. The
+    # timestamp now lives in its own tiny block AFTER this breakpoint: on any
+    # turn where her items/facts/prefs didn't change (the common case for two
+    # messages minutes apart), this entire block cache-hits too.
     system = [
         {"type": "text", "text": PERSONALITY, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-        {"type": "text", "text": _state_block()},
+        {"type": "text", "text": _state_block(), "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": _now_line()},
     ]
 
     captured = []   # item titles saved this turn, for the fallback confirmation
@@ -607,18 +639,44 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     # corrective round-trip — either it actually makes the calls now, or it
     # honestly walks the claim back. This is what tonight's incident was:
     # Penny said "I've turned off your evening digest" with nothing behind it.
-    if text and not captured and not did and claims_change(text):
+    if text and not captured and not did and (claims_change(text) or llm_claims_change(text)):
         n = memory.bump_counter("incident_claims")
         log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:200])
         messages.append({"role": "assistant", "content": resp.content})
         messages.append({"role": "user", "content": [{"type": "text", "text": (
-            "(system check: you stated a change but no tool call succeeded this turn. "
-            "Either make the tool calls now and confirm, or restate honestly what you "
-            "could not do — never claim an unexecuted change.)"
+            "(automated system check, not a message from her — she has not seen your "
+            "last reply yet and did not correct you: you stated a change but no tool call "
+            "succeeded this turn. Silently make the correct tool call(s) now and reply to "
+            "her as your first and only response — do not say 'you're right', don't "
+            "reference this check, don't apologize for a mistake she hasn't seen. If you "
+            "genuinely cannot do it, state that plainly instead of claiming success — "
+            "but still phrase it as your one and only reply to her, not a correction.)"
         )}]})
         resp = _create(messages)
         _execute_tool_calls(resp.content)
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
+
+    # Capture-completeness check: a long message that saved at least one item
+    # gets a cheap second look for siblings the model missed ("a rambling
+    # paragraph may hold six items"). One corrective round-trip max; the checker
+    # failing or returning nonsense costs nothing (fail-open, NONE-biased).
+    if captured and len(user_text) >= 100:
+        missed = _missed_captures(user_text, captured)
+        if missed:
+            log.warning("capture check found %d possibly-missed item(s): %r", len(missed), missed)
+            messages.append({"role": "assistant", "content": resp.content})
+            messages.append({"role": "user", "content": [{"type": "text", "text": (
+                "(automated system check, not a message from her — she has not seen your "
+                "reply yet: her message may have contained items you did not capture: "
+                + "; ".join(missed[:5]) + ". If any of these are genuinely distinct new items "
+                "she asked to save, capture them now and confirm everything in one reply. If "
+                "they are duplicates of items you already saved or not actually asks, change "
+                "nothing and simply restate your confirmation. Reply as your first and only "
+                "response to her — do not mention this check.)"
+            )}]})
+            resp = _create(messages)
+            _execute_tool_calls(resp.content)
+            text = "".join(b.text for b in resp.content if b.type == "text").strip()
 
     if not text:
         if captured:
@@ -634,7 +692,11 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 CLAIM_PATTERN = (
     r"turned off|turned on|i've set|i've moved|i've updated|i've changed|i've paused|"
     r"now on your list|reminders? (?:is|are)? ?(?:now )?set|on the calendar|checked off|"
-    r"dropped the|saved that"
+    # "Got it:" / "noted" are capture confirmations — with a real capture behind
+    # them the guard never runs (captured is non-empty), so matching them here
+    # only ever fires on the empty-promise case (seen live 2026-07-16: "Got it:
+    # bring AirPods..." with zero tool calls and nothing saved)
+    r"dropped the|saved that|\bgot it\b|\bnoted\b"
 )
 _CLAIM_RE = re.compile(CLAIM_PATTERN, re.IGNORECASE)
 
@@ -647,6 +709,62 @@ def claims_change(text: str) -> bool:
     return bool(_CLAIM_RE.search(text))
 
 
+JUDGE_PROMPT = """Reply with exactly one word, YES or NO.
+
+Does the following assistant message assert that the assistant HAS ALREADY \
+made, saved, changed, completed, or scheduled something during this turn? \
+Promises about the future ("I'll remind you at 9"), questions, summaries of \
+existing state, and general conversation are all NO. Only a claim that an \
+action has already been performed is YES.
+
+Assistant message:
+{text}"""
+
+
+MISSED_CAPTURE_PROMPT = """The user sent their assistant this message:
+---
+{user_text}
+---
+The assistant saved these items from it: {saved}
+
+List any OTHER distinct, actionable to-do items the user explicitly asked to \
+save in that message that are NOT covered by the saved list. Rules: reply \
+NONE unless you are confident something real was missed; near-duplicates, \
+rephrasings of saved items, questions, and general chat are NOT missed items. \
+Reply with NONE, or one missed item per line (max 5), nothing else."""
+
+
+def _missed_captures(user_text: str, captured: list) -> list:
+    """Cheap post-capture completeness check. Returns possibly-missed item
+    descriptions, or [] (including on any error — fail-open: this must never
+    block a reply or invent work)."""
+    try:
+        raw = quick(
+            MISSED_CAPTURE_PROMPT.format(user_text=user_text[:2000], saved=", ".join(captured)),
+            max_tokens=150,
+        )
+    except Exception:
+        log.exception("capture check failed (failing open)")
+        return []
+    if raw.strip().upper().startswith("NONE"):
+        return []
+    lines = [l.strip("-• ").strip() for l in raw.splitlines() if l.strip()]
+    return [l for l in lines if l and l.upper() != "NONE"][:5]
+
+
+def llm_claims_change(text: str) -> bool:
+    """Second layer of the empty-promise guard: a cheap model judgment for
+    claim phrasings the regex can't anticipate ("that's off your plate now",
+    "consider it handled"). Costs ~$0.0005/turn. Fails OPEN (returns False)
+    on any error — this layer must never be able to block or delay a reply."""
+    try:
+        verdict = quick(JUDGE_PROMPT.format(text=text[:1200]), max_tokens=5)
+        return verdict.strip().upper().startswith("YES")
+    except Exception:
+        log.exception("claim judge failed (failing open)")
+        return False
+
+
 def quick(prompt: str, model: str = None, max_tokens: int = 800) -> str:
     """One-shot completion with no tools/history — used for email triage etc."""
     m = model or CLASSIFIER_MODEL
@@ -657,3 +775,39 @@ def quick(prompt: str, model: str = None, max_tokens: int = 800) -> str:
     )
     _track_usage(m, resp.usage)
     return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+DIGEST_PROMPT = """{state}
+
+Write the owner's morning digest for {today}. Rules:
+- Order today's due items into a realistic sequence given their times; name the ONE thing that matters most first.
+- Then a "Heads up:" section ONLY if you find real problems in the next 3 days: time conflicts, an item missing obvious prep (a gift not bought before its wrapping day), or something due on a day off. Skip the section entirely if there are none — never invent a concern.
+- Items with a specific future due date are NOT suggestions for today; only genuinely undated items may be offered as "if there's spare energy" (max 3).
+- Plain text, no markdown headers/bold, max 12 short lines, warm but not chatty. Do not greet with her name. Never claim anything was changed or handled — this is a read-only summary.
+- End with exactly this line: ({n_open} things safely on the list — say "list" anytime.)"""
+
+
+def compose_digest() -> str | None:
+    """Model-written morning digest: plan-shaped, conflict-aware. Returns None
+    on any failure or if spending is capped — the caller ALWAYS has the plain
+    f-string digest as fallback, so a digest can never be lost to this feature."""
+    if today_spend() >= HARD_CAP_USD:
+        log.warning("smart digest skipped: daily hard cap reached")
+        return None
+    now = datetime.now(TZ)
+    try:
+        text = quick(
+            DIGEST_PROMPT.format(
+                state=_state_block(),
+                today=now.strftime("%A, %B %-d"),
+                n_open=len(memory.open_items()),
+            ),
+            max_tokens=400,
+        )
+    except Exception:
+        log.exception("smart digest failed; falling back to plain digest")
+        return None
+    # sanity: an empty or absurdly long reply falls back rather than shipping
+    if not text or len(text) > 1500:
+        return None
+    return text

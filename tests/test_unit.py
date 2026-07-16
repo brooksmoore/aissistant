@@ -378,10 +378,56 @@ class TestCostControls(unittest.TestCase):
 
     def test_hard_cap_stops_api_calls_entirely(self):
         key = "spend_" + datetime.now(config.TZ).date().isoformat()
-        memory.set_setting(key, str(3 * config.DAILY_BUDGET_USD + 0.01))
+        memory.set_setting(key, str(config.HARD_CAP_USD + 0.01))
         reply = self.brain.respond("hi penny")  # must NOT hit the API
         self.assertIn("resting", reply)
         self.assertIn("reminders", reply)
+
+    def test_hard_cap_is_its_own_knob_above_soft(self):
+        # raising the soft breaker must never silently move the hard stop
+        self.assertGreater(config.HARD_CAP_USD, config.DAILY_BUDGET_USD)
+        self.assertLessEqual(config.HARD_CAP_USD, 0.25)
+
+    def test_smart_digest_returns_none_at_hard_cap(self):
+        key = "spend_" + datetime.now(config.TZ).date().isoformat()
+        memory.set_setting(key, str(config.HARD_CAP_USD + 0.01))
+        self.assertIsNone(self.brain.compose_digest())  # must NOT hit the API
+
+    def test_smart_digest_fails_open_on_api_error(self):
+        orig = self.brain.quick
+        self.brain.quick = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down"))
+        try:
+            self.assertIsNone(self.brain.compose_digest())
+        finally:
+            self.brain.quick = orig
+
+    def test_claim_judge_fails_open_on_api_error(self):
+        orig = self.brain.quick
+        self.brain.quick = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down"))
+        try:
+            self.assertFalse(self.brain.llm_claims_change("consider it handled"))
+        finally:
+            self.brain.quick = orig
+
+    def test_capture_check_fails_open_on_api_error(self):
+        orig = self.brain.quick
+        self.brain.quick = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down"))
+        try:
+            self.assertEqual(self.brain._missed_captures("long message " * 20, ["one thing"]), [])
+        finally:
+            self.brain.quick = orig
+
+    def test_capture_check_parses_none_and_lists(self):
+        orig = self.brain.quick
+        try:
+            self.brain.quick = lambda *a, **k: "NONE"
+            self.assertEqual(self.brain._missed_captures("msg", ["a"]), [])
+            self.brain.quick = lambda *a, **k: "none — everything was captured"
+            self.assertEqual(self.brain._missed_captures("msg", ["a"]), [])
+            self.brain.quick = lambda *a, **k: "- buy stamps\n- call the vet"
+            self.assertEqual(self.brain._missed_captures("msg", ["a"]), ["buy stamps", "call the vet"])
+        finally:
+            self.brain.quick = orig
 
     def test_history_window_is_cache_stable(self):
         """The prefix must stay byte-identical across several turns (block sliding)."""
@@ -400,6 +446,23 @@ class TestCostControls(unittest.TestCase):
             memory.add_fact(f"fact number {i}")
         state = self.brain._state_block()
         self.assertLess(state.count("fact number"), 70)
+
+    def test_state_block_is_stable_across_close_turns(self):
+        """Real incident: a to-the-minute timestamp used to live inside
+        _state_block(), so it (and the prompt-cache breakpoint after it) was
+        never byte-identical between two turns, even seconds apart — the
+        cache never hit past the personality block. The timestamp must now
+        live outside this function entirely."""
+        memory.add_fact("she likes tea")
+        s1 = self.brain._state_block()
+        s2 = self.brain._state_block()  # a later call, "time" having moved on
+        self.assertEqual(s1, s2)
+        self.assertNotIn("Now:", s1)  # moved out to _now_line()
+
+    def test_now_line_is_separate_and_carries_the_timestamp(self):
+        line = self.brain._now_line()
+        self.assertTrue(line.startswith("Now:"))
+        self.assertIn(datetime.now(config.TZ).strftime("%A, %B"), line)
 
 
 class TestDrift(unittest.TestCase):

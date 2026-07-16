@@ -91,15 +91,28 @@ def _log_proactive(prefix: str, text: str):
     memory.log_msg("assistant", f"[{prefix}] {text}")
 
 
-def item_buttons(item_id: int, mute: bool = False) -> InlineKeyboardMarkup:
-    row = [
-        InlineKeyboardButton("✅ Done", callback_data=f"done:{item_id}"),
-        InlineKeyboardButton("⏰ +1h", callback_data=f"snooze:{item_id}:60"),
-        InlineKeyboardButton("🌙 Tomorrow", callback_data=f"tmrw:{item_id}"),
-    ]
+# events (social/appointment) happen at a fixed time or don't happen at all —
+# "snooze 1h" and "push to tomorrow" don't mean anything for trivia night or a
+# dinner reservation, only for a task you can actually do at a different time
+EVENT_CATEGORIES = ("social", "appointment")
+
+
+def item_button_row(item_id: int, category: str = "task", mute: bool = False) -> list:
+    if category in EVENT_CATEGORIES:
+        row = [InlineKeyboardButton("✅ Done", callback_data=f"done:{item_id}")]
+    else:
+        row = [
+            InlineKeyboardButton("✅ Done", callback_data=f"done:{item_id}"),
+            InlineKeyboardButton("⏰ +1h", callback_data=f"snooze:{item_id}:60"),
+            InlineKeyboardButton("🌙 Tomorrow", callback_data=f"tmrw:{item_id}"),
+        ]
     if mute:
         row.append(InlineKeyboardButton("🔕", callback_data=f"mute:{item_id}"))
-    return InlineKeyboardMarkup([row])
+    return row
+
+
+def item_buttons(item_id: int, category: str = "task", mute: bool = False) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([item_button_row(item_id, category, mute)])
 
 
 def checklist_markup(items, max_buttons=8) -> InlineKeyboardMarkup:
@@ -226,7 +239,7 @@ async def _send_single(context, chat_id, entry: dict, show_overdue: bool):
     text = _reminder_text(entry, show_overdue)
     # the mute button only makes sense on a repeating nag — a scheduled
     # reminder is a one-shot moment she asked for, nothing to mute yet
-    markup = item_buttons(it["id"], mute=(entry["kind"] == "nag" and it["remind_count"] >= 1))
+    markup = item_buttons(it["id"], it["category"], mute=(entry["kind"] == "nag" and it["remind_count"] >= 1))
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     _log_proactive("reminder", text)
     _bump_pings(1)
@@ -237,7 +250,14 @@ async def _send_bundle(context, chat_id, entries: list, show_overdue: bool):
     for idx, e in enumerate(entries, 1):
         lines.append(f"{idx}. {e['item']['title']}")
     text = "\n".join(lines)
-    markup = checklist_markup([e["item"] for e in entries], max_buttons=len(entries))
+    # one message, one notification (the whole point of bundling) — but a full
+    # Done/+1h/Tomorrow row per item instead of a bare checkmark, so what you
+    # can do with a reminder doesn't depend on how many fired at once
+    rows = [
+        item_button_row(e["item"]["id"], e["item"]["category"], mute=(e["kind"] == "nag" and e["item"]["remind_count"] >= 1))
+        for e in entries
+    ]
+    markup = InlineKeyboardMarkup(rows)
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     _log_proactive("reminder", text)
     _bump_pings(1)  # one notification event, however many items it covers
@@ -283,6 +303,22 @@ async def morning_digest(context):
         return
     now = datetime.now(TZ)
     items = memory.open_items()
+
+    # Model-composed digest (default): plan-shaped, sequences the day, flags
+    # real conflicts/missing prep. compose_digest() returns None on ANY failure
+    # or budget stop, in which case the plain f-string build below ships instead
+    # — a digest can never be lost to this feature. digest_style=plain opts out.
+    if pref("digest_style", "smart") == "smart":
+        import brain  # deferred: brain imports this module at load time
+        smart = await asyncio.to_thread(brain.compose_digest)
+        if smart:
+            text = f"{icon('☀️')}Morning! It's {now.strftime('%A, %B %-d')}.\n\n{smart}"
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            _log_proactive("digest", text)
+            _bump_pings(1)
+            await _stale_sweep(context, chat_id)
+            return
+
     parts = [f"{icon('☀️')}Morning! It's {now.strftime('%A, %B %-d')}."]
 
     if gcal.enabled():
@@ -299,13 +335,23 @@ async def morning_digest(context):
     due_today = [i for i in items if (d := memory.parse_dt(i["due_at"])) and d.date() <= now.date()]
     if due_today:
         parts.append("\nNeeds you today:")
-        for i in due_today[:6]:
+        # a silent [:N] cutoff here once dropped two genuinely-due items off the
+        # bottom of the list with zero indication anything was missing — cap
+        # the same way the list footer does, with a visible "+N more" instead
+        shown, rest = due_today[:8], due_today[8:]
+        for i in shown:
             parts.append(f"  • {i['title']}")
-    # "spare energy" is for flexible work she could get ahead on — a fixed-time
-    # future event (a dinner reservation, a trivia night) can't be done early no
-    # matter how much energy she has, so it must never land in this bucket just
-    # because it happens to not be due today
-    top = [i for i in items if i not in due_today and i["category"] not in ("social", "appointment")][:3]
+        if rest:
+            parts.append(f"  …+{len(rest)} more due today (say \"list\" to see everything)")
+    # "spare energy" is for flexible, undated backlog work she could get ahead
+    # on. Anything with a specific future due_at — a dinner reservation, trivia
+    # night, a Sunday-only recurring email, a reminder tied to a day later this
+    # week — can't be done early no matter how much energy she has, so it must
+    # never land here just because it happens to not be due *today*. A
+    # category blocklist (social/appointment only) isn't enough: a dated task
+    # in any other category (e.g. "ask boss to leave early" for a future day)
+    # slips right through it.
+    top = [i for i in items if i not in due_today and not i["due_at"]][:3]
     if top:
         parts.append("\nIf there's spare energy:")
         for i in top:
@@ -318,7 +364,10 @@ async def morning_digest(context):
     await context.bot.send_message(chat_id=chat_id, text=text)
     _log_proactive("digest", text)
     _bump_pings(1)
+    await _stale_sweep(context, chat_id)
 
+
+async def _stale_sweep(context, chat_id):
     # stale sweep (B3): items whose nag chain gave up (24h+ past due) get one
     # gentle, guilt-free follow-up with checklist buttons — never re-nagged
     stale = memory.overdue_stale_items(NAG_WINDOW_HOURS)[:5]

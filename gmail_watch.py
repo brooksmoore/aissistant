@@ -9,7 +9,7 @@ from datetime import datetime
 import brain
 import gcal
 import memory
-from config import CLASSIFIER_MODEL, DAILY_BUDGET_USD, GOOGLE_TOKEN, TZ
+from config import CLASSIFIER_MODEL, HARD_CAP_USD, GOOGLE_TOKEN, TZ
 from scheduler import _quiet, icon as deco_icon, item_buttons, pref
 
 log = logging.getLogger("penny.gmail")
@@ -134,7 +134,7 @@ async def poll(context):
     chat_id = memory.get_setting("owner_chat_id")
     if not chat_id:
         return
-    if brain.today_spend() >= 3 * DAILY_BUDGET_USD:
+    if brain.today_spend() >= HARD_CAP_USD:
         # hard cap tripped: skip entirely (nothing fetched or marked, so today's
         # mail is simply triaged on a later poll instead of spending past the cap)
         return

@@ -226,6 +226,30 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(tmp)
 
 
+def _drop_row(markup, item_id: int):
+    """Remove the button row for one item from a multi-item bundle markup,
+    leaving the other items' rows tappable. Returns None if that was the last row."""
+    if not markup:
+        return None
+    kept = [row for row in markup.inline_keyboard if not any(f":{item_id}" in (b.callback_data or "") for b in row)]
+    return scheduler.InlineKeyboardMarkup(kept) if kept else None
+
+
+async def _resolve_bundle_row(q, item_id: int, note: str):
+    """A bundle message carries one row per item — settling one item must not
+    blow away the text/buttons for the others still pending in the same message."""
+    markup = q.message.reply_markup
+    is_bundle = markup and len(markup.inline_keyboard) > 1
+    if is_bundle:
+        remaining = _drop_row(markup, item_id)
+        if remaining:
+            await q.edit_message_reply_markup(reply_markup=remaining)
+        else:
+            await q.edit_message_text(f"{q.message.text}\n\n{note}")
+        return True
+    return False
+
+
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if _owner() != str(q.message.chat.id):
@@ -252,6 +276,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     scheduler.render_list(remaining),
                     reply_markup=scheduler.checklist_markup(remaining),
                 )
+            elif await _resolve_bundle_row(q, item["id"], "✅ All done!"):
+                pass
             else:
                 await q.edit_message_text(f"✅ {item['title']} — done. {len(remaining)} left on the list.")
         else:
@@ -260,23 +286,32 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # a fresh one-shot scheduled ping, not a nag-track mutation — snoozing
         # must not touch remind_count/next_remind_at (those are reserved for
         # the overdue nag chase; see scheduler.py's v1.5 module docstring)
+        item_id = int(parts[1])
+        item = memory.get_item(item_id)
         nxt = (datetime.now(TZ) + timedelta(minutes=int(parts[2]))).isoformat(timespec="seconds")
-        memory.add_reminder(int(parts[1]), nxt)
+        memory.add_reminder(item_id, nxt)
         await q.answer("Snoozed ⏰")
-        await q.edit_message_text(f"{q.message.text}\n\n⏰ Snoozed — I'll circle back in an hour.")
+        note = f"⏰ Snoozed: {item['title']} — I'll circle back in an hour." if item else "⏰ Snoozed — I'll circle back in an hour."
+        if not await _resolve_bundle_row(q, item_id, note):
+            await q.edit_message_text(f"{q.message.text}\n\n{note}")
     elif action == "tmrw" and len(parts) == 2:
+        item_id = int(parts[1])
+        item = memory.get_item(item_id)
         tomorrow9 = datetime.now(TZ).replace(hour=9, minute=0, second=0) + timedelta(days=1)
-        memory.add_reminder(int(parts[1]), tomorrow9.isoformat(timespec="seconds"))
+        memory.add_reminder(item_id, tomorrow9.isoformat(timespec="seconds"))
         await q.answer("Moved to tomorrow 🌙")
-        await q.edit_message_text(f"{q.message.text}\n\n🌙 Parked until tomorrow morning. Sleep easy.")
+        note = f"🌙 Parked until tomorrow: {item['title']}." if item else "🌙 Parked until tomorrow morning. Sleep easy."
+        if not await _resolve_bundle_row(q, item_id, note):
+            await q.edit_message_text(f"{q.message.text}\n\n{note}")
     elif action == "mute" and len(parts) == 2:
         item_id = int(parts[1])
+        item = memory.get_item(item_id)
         memory.update_item(item_id, next_remind_at=None)
         memory.delete_unfired_reminders(item_id)
         await q.answer("Muted 🔕")
-        await q.edit_message_text(
-            f"{q.message.text}\n\n🔕 No more pings for this — it stays on your list and in digests."
-        )
+        note = f"🔕 No more pings for: {item['title']}." if item else "🔕 No more pings for this — it stays on your list and in digests."
+        if not await _resolve_bundle_row(q, item_id, note):
+            await q.edit_message_text(f"{q.message.text}\n\n{note}")
     else:
         await q.answer()
 
