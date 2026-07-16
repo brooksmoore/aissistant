@@ -178,11 +178,11 @@ class TestReminderTiming(unittest.TestCase):
     def test_quiet_hours_span_midnight(self):
         s = self.scheduler
         mk = lambda h: datetime.now(config.TZ).replace(hour=h, minute=0)
-        self.assertTrue(s._quiet(mk(23)))
-        self.assertTrue(s._quiet(mk(2)))
-        self.assertFalse(s._quiet(mk(12)))
+        self.assertTrue(s.quiet_now(mk(23)))
+        self.assertTrue(s.quiet_now(mk(2)))
+        self.assertFalse(s.quiet_now(mk(12)))
         memory.set_setting("pref_quiet_start_hour", "21")  # her actual request once
-        self.assertTrue(s._quiet(mk(21)))
+        self.assertTrue(s.quiet_now(mk(21)))
 
     def test_disabled_digest_never_fires(self):
         """set_preference has no way to turn a digest off entirely, an owner asks
@@ -318,30 +318,37 @@ class TestMalleability(unittest.TestCase):
 
     def test_can_pause_all_notifications(self):
         r = self.brain._run_tool("set_preference", {"key": "notifications_enabled", "value": "maybe"})
-        self.assertIn("must be", r)
+        self.assertFalse(r.ok)
+        self.assertIn("must be", r.message)
         r = self.brain._run_tool("set_preference", {"key": "notifications_enabled", "value": "no"})
-        self.assertIn("updated", r.lower())
+        self.assertTrue(r.ok)
+        self.assertIn("updated", r.message.lower())
         self.assertEqual(memory.get_setting("pref_notifications_enabled"), "no")
 
     def test_can_disable_gmail_watch(self):
         r = self.brain._run_tool("set_preference", {"key": "gmail_watch_enabled", "value": "no"})
-        self.assertIn("updated", r.lower())
+        self.assertTrue(r.ok)
+        self.assertIn("updated", r.message.lower())
         self.assertEqual(memory.get_setting("pref_gmail_watch_enabled"), "no")
 
     def test_can_actually_disable_a_digest(self):
         """The exact request that used to be an empty promise: 'I don't need
         evening check-ins anymore' must have a real mechanism behind it."""
         r = self.brain._run_tool("set_preference", {"key": "evening_digest_enabled", "value": "sparkly"})
-        self.assertIn("must be", r)
+        self.assertFalse(r.ok)
+        self.assertIn("must be", r.message)
         r = self.brain._run_tool("set_preference", {"key": "evening_digest_enabled", "value": "no"})
-        self.assertIn("updated", r.lower())
+        self.assertTrue(r.ok)
+        self.assertIn("updated", r.message.lower())
         self.assertEqual(memory.get_setting("pref_evening_digest_enabled"), "no")
 
     def test_set_preference_validation(self):
         r = self.brain._run_tool("set_preference", {"key": "emoji_level", "value": "sparkly"})
-        self.assertIn("must be", r)
+        self.assertFalse(r.ok)
+        self.assertIn("must be", r.message)
         r = self.brain._run_tool("set_preference", {"key": "emoji_level", "value": "none"})
-        self.assertIn("updated", r.lower())
+        self.assertTrue(r.ok)
+        self.assertIn("updated", r.message.lower())
         self.assertEqual(memory.get_setting("pref_emoji_level"), "none")
 
     def test_prefs_visible_to_model(self):

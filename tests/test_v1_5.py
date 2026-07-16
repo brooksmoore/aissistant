@@ -389,7 +389,7 @@ class TestSmartDigestFallback(unittest.TestCase):
     def test_smart_digest_used_when_compose_succeeds(self):
         memory.add_item("write the card", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
         orig = self.brain.compose_digest
-        self.brain.compose_digest = lambda: "Card first, then the day is yours."
+        self.brain.compose_digest = lambda *a: "Card first, then the day is yours."
         try:
             ctx = FakeContext()
             run(self.scheduler.morning_digest(ctx))
@@ -401,7 +401,7 @@ class TestSmartDigestFallback(unittest.TestCase):
     def test_plain_fallback_when_compose_returns_none(self):
         memory.add_item("write the card", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
         orig = self.brain.compose_digest
-        self.brain.compose_digest = lambda: None
+        self.brain.compose_digest = lambda *a: None
         try:
             ctx = FakeContext()
             run(self.scheduler.morning_digest(ctx))
@@ -415,13 +415,39 @@ class TestSmartDigestFallback(unittest.TestCase):
         memory.set_setting("pref_digest_style", "plain")
         memory.add_item("write the card", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
         orig = self.brain.compose_digest
-        self.brain.compose_digest = lambda: (_ for _ in ()).throw(AssertionError("must not be called"))
+        self.brain.compose_digest = lambda *a: (_ for _ in ()).throw(AssertionError("must not be called"))
         try:
             ctx = FakeContext()
             run(self.scheduler.morning_digest(ctx))
         finally:
             self.brain.compose_digest = orig
         self.assertIn("write the card", ctx.bot.sent[0]["text"])
+
+    def test_smart_digest_receives_the_same_precomputed_buckets_as_plain(self):
+        """The smart digest must not re-derive 'what's due today' / 'what's
+        spare energy' itself from raw state — it gets the exact same
+        scheduler.digest_buckets() output the plain path uses, so the two
+        can never drift (real incident: a spare-energy fix once only
+        touched the Python filter, leaving the smart prompt's copy stale)."""
+        memory.add_item("due today thing", due_at=datetime.now(config.TZ).isoformat(timespec="seconds"))
+        memory.add_item("undated backlog thing", due_at=None)
+        seen = {}
+
+        def fake_compose(due_today_titles, spare_energy_titles, n_open):
+            seen["due"] = due_today_titles
+            seen["spare"] = spare_energy_titles
+            seen["n"] = n_open
+            return "ok"
+
+        orig = self.brain.compose_digest
+        self.brain.compose_digest = fake_compose
+        try:
+            run(self.scheduler.morning_digest(FakeContext()))
+        finally:
+            self.brain.compose_digest = orig
+        self.assertEqual(seen["due"], ["due today thing"])
+        self.assertEqual(seen["spare"], ["undated backlog thing"])
+        self.assertEqual(seen["n"], 2)
 
 
 class TestDigestDoesNotSilentlyDropDueItems(unittest.TestCase):

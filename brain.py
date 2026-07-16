@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 from datetime import datetime
+from typing import NamedTuple
 
 import anthropic
 
@@ -347,7 +348,19 @@ def _tools() -> list:
     return tools
 
 
-def _run_tool(name: str, inp: dict) -> str:
+class ToolResult(NamedTuple):
+    """Structured tool outcome — replaces the old convention of sniffing
+    English prefixes ("Tool error", "Unknown", "Invalid") on the returned
+    string to decide success. That heuristic was load-bearing for the
+    empty-promise guard and the captured/did tracking that drives it: any
+    new error phrasing that didn't start with one of those exact words would
+    have been silently read as success. `ok` is now the single source of
+    truth for callers; `message` is only ever shown to the model/user."""
+    ok: bool
+    message: str
+
+
+def _run_tool(name: str, inp: dict) -> ToolResult:
     try:
         if name == "capture_item":
             item_id = memory.add_item(
@@ -361,10 +374,10 @@ def _run_tool(name: str, inp: dict) -> str:
                 recurrence_until=inp.get("recurrence_until"),
                 reminder_text=inp.get("reminder_text"),
             )
-            return f"Saved as item #{item_id}."
+            return ToolResult(True, f"Saved as item #{item_id}.")
         if name == "complete_item":
             memory.complete_item(inp["item_id"])
-            return "Marked done."
+            return ToolResult(True, "Marked done.")
         if name == "update_item":
             fields = {k: v for k, v in inp.items() if k != "item_id"}
             remind_at = fields.pop("remind_at", None)
@@ -378,54 +391,54 @@ def _run_tool(name: str, inp: dict) -> str:
                 # replaces pending pings, not a column on items — see v1.5 split
                 # in scheduler.py (scheduled reminders vs the nag chase)
                 memory.replace_item_reminders(inp["item_id"], remind_at)
-            return "Updated."
+            return ToolResult(True, "Updated.")
         if name == "set_preference":
             key, value = inp["key"], str(inp["value"]).strip()
             if key == "reminder_style" and value not in ("gentle", "normal", "persistent"):
-                return "Invalid style — use gentle, normal, or persistent."
+                return ToolResult(False, "Invalid style — use gentle, normal, or persistent.")
             if key == "emoji_level" and value not in ("none", "minimal", "normal"):
-                return "emoji_level must be none, minimal, or normal."
+                return ToolResult(False, "emoji_level must be none, minimal, or normal.")
             if key == "reply_length" and value not in ("short", "normal"):
-                return "reply_length must be short or normal."
+                return ToolResult(False, "reply_length must be short or normal.")
             if key == "digest_style" and value not in ("smart", "plain"):
-                return "digest_style must be smart or plain."
+                return ToolResult(False, "digest_style must be smart or plain.")
             if key == "digest_show_completed" and value not in ("yes", "no"):
-                return "digest_show_completed must be yes or no."
+                return ToolResult(False, "digest_show_completed must be yes or no.")
             if key.endswith("_digest_enabled") and value not in ("yes", "no"):
-                return f"{key} must be yes or no."
+                return ToolResult(False, f"{key} must be yes or no.")
             if key in ("notifications_enabled", "gmail_watch_enabled", "reminder_overdue_label") and value not in ("yes", "no"):
-                return f"{key} must be yes or no."
+                return ToolResult(False, f"{key} must be yes or no.")
             if key.endswith("_hour") and not (value.isdigit() and 0 <= int(value) <= 23):
-                return "Hour must be 0-23."
+                return ToolResult(False, "Hour must be 0-23.")
             if key.endswith("_time"):
                 try:
                     h, m = value.split(":")
                     assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
                 except (ValueError, AssertionError):
-                    return "Time must be HH:MM (24h)."
+                    return ToolResult(False, "Time must be HH:MM (24h).")
             if (key.startswith("nag_interval") or key in ("max_nags", "daily_ping_cap")) and not value.isdigit():
-                return "Must be a whole number."
+                return ToolResult(False, "Must be a whole number.")
             memory.set_setting("pref_" + key, value)
-            return f"Preference updated: {key} = {value}."
+            return ToolResult(True, f"Preference updated: {key} = {value}.")
         if name == "remember_fact":
             replaced = inp.get("replaces_fact_id")
             if replaced:
                 memory.delete_fact(replaced)
             memory.add_fact(inp["fact"], inp.get("category", "general"))
-            return "Old fact replaced." if replaced else "Remembered."
+            return ToolResult(True, "Old fact replaced." if replaced else "Remembered.")
         if name == "create_calendar_event":
             eid = gcal.create_event(inp["title"], inp["start"], inp.get("end"), inp.get("notes", ""))
-            return f"Event created (id {eid})."
+            return ToolResult(True, f"Event created (id {eid}).")
         if name == "update_calendar_event":
             gcal.update_event(inp["event_id"], inp.get("title"), inp.get("start"), inp.get("end"), inp.get("notes"))
-            return "Event updated."
+            return ToolResult(True, "Event updated.")
         if name == "delete_calendar_event":
             gcal.delete_event(inp["event_id"])
-            return "Event deleted."
-        return f"Unknown tool {name}."
+            return ToolResult(True, "Event deleted.")
+        return ToolResult(False, f"Unknown tool {name}.")
     except Exception as e:
         log.exception("tool %s failed", name)
-        return f"Tool error: {e}"
+        return ToolResult(False, f"Tool error: {e}")
 
 
 def _state_block() -> str:
@@ -584,8 +597,8 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
                 row = memory.get_item(block.input.get("item_id", -1))
                 pre_title = row["title"] if row else None
             result = _run_tool(block.name, block.input)
-            ok = not result.startswith(("Tool error", "Unknown", "Invalid"))
-            if block.name == "capture_item" and result.startswith("Saved"):
+            ok = result.ok
+            if block.name == "capture_item" and ok:
                 captured.append(block.input.get("title", "item"))
             elif ok and block.name == "complete_item" and pre_title:
                 did.append(f"checked off \"{pre_title}\"")
@@ -597,7 +610,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
                 did.append("saved that to memory")
             elif ok and block.name.endswith("calendar_event"):
                 did.append("updated the calendar")
-            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result.message})
         return tool_results
 
     def _create(msgs):
@@ -795,28 +808,51 @@ def quick(prompt: str, model: str = None, max_tokens: int = 800) -> str:
 
 DIGEST_PROMPT = """{state}
 
+Authoritative for today's digest — already correctly filtered by code, do not
+second-guess, add to, or drop from these two lists; your job is order and
+tone only, not filtering:
+Due today: {due_today_list}
+Spare energy (undated, optional, offer only if non-empty): {spare_energy_list}
+
 Write the owner's morning digest for {today}. Rules:
-- Order today's due items into a realistic sequence given their times; name the ONE thing that matters most first.
-- Then a "Heads up:" section ONLY if you find real problems in the next 3 days: time conflicts, an item missing obvious prep (a gift not bought before its wrapping day), or something due on a day off. Skip the section entirely if there are none — never invent a concern.
-- Items with a specific future due date are NOT suggestions for today; only genuinely undated items may be offered as "if there's spare energy" (max 3).
+- Using ONLY the "Due today" list above, order those items into a realistic sequence given their times (see the state below for exact times); name the ONE thing that matters most first.
+- Then a "Heads up:" section ONLY if you find real problems in the next 3 days using the state below: time conflicts, an item missing obvious prep (a gift not bought before its wrapping day), or something due on a day off. Skip the section entirely if there are none — never invent a concern.
+- If the spare-energy list above is non-empty, offer those exact items as "if there's spare energy" — nothing else belongs in that section, and nothing from it belongs in "due today" or vice versa.
 - Plain text, no markdown headers/bold, max 12 short lines, warm but not chatty. Do not greet with her name. Never claim anything was changed or handled — this is a read-only summary.
 - End with exactly this line: ({n_open} things safely on the list — say "list" anytime.)"""
 
 
-def compose_digest() -> str | None:
-    """Model-written morning digest: plan-shaped, conflict-aware. Returns None
-    on any failure or if spending is capped — the caller ALWAYS has the plain
-    f-string digest as fallback, so a digest can never be lost to this feature."""
+def compose_digest(due_today_titles: list = None, spare_energy_titles: list = None, n_open: int = None) -> str | None:
+    """Model-written morning digest: plan-shaped, conflict-aware. The two
+    title lists are the SAME due-today/spare-energy filtering scheduler.py's
+    plain digest uses (scheduler.digest_buckets) — handing them over as
+    ground truth means the model only writes sequencing/tone/heads-up prose
+    around already-correct data, instead of re-deriving "what's due today"
+    itself from the raw state block. That re-derivation is exactly what drifted
+    out of sync with the Python filter after a live spare-energy bug fix
+    only touched one of the two implementations. Returns None on any failure
+    or if spending is capped — the caller ALWAYS has the plain f-string
+    digest as fallback, so a digest can never be lost to this feature."""
     if today_spend() >= HARD_CAP_USD:
         log.warning("smart digest skipped: daily hard cap reached")
         return None
     now = datetime.now(TZ)
+    if due_today_titles is None or spare_energy_titles is None or n_open is None:
+        # standalone call (tests, ad-hoc use) — fall back to computing fresh
+        import scheduler
+        items = memory.open_items()
+        due_today, spare_energy = scheduler.digest_buckets(items, now)
+        due_today_titles = [i["title"] for i in due_today]
+        spare_energy_titles = [i["title"] for i in spare_energy]
+        n_open = len(items)
     try:
         text = quick(
             DIGEST_PROMPT.format(
                 state=_state_block(),
                 today=now.strftime("%A, %B %-d"),
-                n_open=len(memory.open_items()),
+                due_today_list=", ".join(due_today_titles) or "(none)",
+                spare_energy_list=", ".join(spare_energy_titles) or "(none)",
+                n_open=n_open,
             ),
             max_tokens=400,
         )

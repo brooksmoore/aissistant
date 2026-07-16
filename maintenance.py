@@ -205,9 +205,9 @@ async def weekly_tick(context):
             # tally + log like every other proactive send (v1.5 rule) — was
             # silently missed here before, hiding this ping from the brain
             # and from the pings_* budget accounting
-            from scheduler import _bump_pings, _log_proactive
-            _log_proactive("digest", text)
-            _bump_pings(1)
+            from scheduler import bump_pings, log_proactive
+            log_proactive("digest", text)
+            bump_pings(1)
         except Exception:
             log.exception("weekly review message failed to send")
 

@@ -67,7 +67,7 @@ def icon(e: str) -> str:
     return f"{e} " if pref("emoji_level", "minimal") == "normal" else ""
 
 
-def _quiet(now: datetime) -> bool:
+def quiet_now(now: datetime) -> bool:
     h = now.hour
     start = pref_int("quiet_start_hour", QUIET_START_HOUR)
     end = pref_int("quiet_end_hour", QUIET_END_HOUR)
@@ -80,11 +80,11 @@ def pings_today() -> int:
     return memory.counter_today("pings")
 
 
-def _bump_pings(n: int = 1) -> int:
+def bump_pings(n: int = 1) -> int:
     return memory.bump_counter("pings", n)
 
 
-def _log_proactive(prefix: str, text: str):
+def log_proactive(prefix: str, text: str):
     """Every scheduled send is logged to the messages table so the brain can
     see its own pings — a reply like 'headed to watch fest' now has its
     trigger in history instead of looking unprompted."""
@@ -176,7 +176,7 @@ async def check_reminders(context):
     if not chat_id or pref("notifications_enabled", "yes") == "no":
         return  # due items stay due — deferred, not lost, same as quiet hours
     now = datetime.now(TZ)
-    quiet = _quiet(now)
+    quiet = quiet_now(now)
     show_overdue = pref("reminder_overdue_label", "yes") == "yes"
     cap = pref_int("daily_ping_cap", DAILY_PING_CAP)
     budget_left = cap - pings_today()
@@ -241,8 +241,8 @@ async def _send_single(context, chat_id, entry: dict, show_overdue: bool):
     # reminder is a one-shot moment she asked for, nothing to mute yet
     markup = item_buttons(it["id"], it["category"], mute=(entry["kind"] == "nag" and it["remind_count"] >= 1))
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
-    _log_proactive("reminder", text)
-    _bump_pings(1)
+    log_proactive("reminder", text)
+    bump_pings(1)
 
 
 async def _send_bundle(context, chat_id, entries: list, show_overdue: bool):
@@ -259,8 +259,8 @@ async def _send_bundle(context, chat_id, entries: list, show_overdue: bool):
     ]
     markup = InlineKeyboardMarkup(rows)
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
-    _log_proactive("reminder", text)
-    _bump_pings(1)  # one notification event, however many items it covers
+    log_proactive("reminder", text)
+    bump_pings(1)  # one notification event, however many items it covers
 
 
 async def digest_tick(context):
@@ -297,12 +297,33 @@ async def digest_tick(context):
             log.exception("%s digest failed (will retry within the grace window)", name)
 
 
+def digest_buckets(items: list, now: datetime) -> tuple:
+    """The one place 'what's due today' and 'what's genuinely spare-energy
+    eligible' get computed — used by both the plain digest and fed into the
+    smart digest's prompt, so there is exactly one filtering rule instead of
+    a Python version and a re-derived English-prose version that can drift
+    out of sync (confirmed: the spare-energy fix here once only touched this
+    function, leaving the smart prompt's copy of the same rule stale)."""
+    due_today = [i for i in items if (d := memory.parse_dt(i["due_at"])) and d.date() <= now.date()]
+    # "spare energy" is for flexible, undated backlog work she could get ahead
+    # on. Anything with a specific future due_at — a dinner reservation, trivia
+    # night, a Sunday-only recurring email, a reminder tied to a day later this
+    # week — can't be done early no matter how much energy she has, so it must
+    # never land here just because it happens to not be due *today*. A
+    # category blocklist (social/appointment only) isn't enough: a dated task
+    # in any other category (e.g. "ask boss to leave early" for a future day)
+    # slips right through it.
+    spare_energy = [i for i in items if i not in due_today and not i["due_at"]][:3]
+    return due_today, spare_energy
+
+
 async def morning_digest(context):
     chat_id = memory.get_setting("owner_chat_id")
     if not chat_id:
         return
     now = datetime.now(TZ)
     items = memory.open_items()
+    due_today, spare_energy = digest_buckets(items, now)
 
     # Model-composed digest (default): plan-shaped, sequences the day, flags
     # real conflicts/missing prep. compose_digest() returns None on ANY failure
@@ -310,12 +331,14 @@ async def morning_digest(context):
     # — a digest can never be lost to this feature. digest_style=plain opts out.
     if pref("digest_style", "smart") == "smart":
         import brain  # deferred: brain imports this module at load time
-        smart = await asyncio.to_thread(brain.compose_digest)
+        smart = await asyncio.to_thread(
+            brain.compose_digest, [i["title"] for i in due_today], [i["title"] for i in spare_energy], len(items)
+        )
         if smart:
             text = f"{icon('☀️')}Morning! It's {now.strftime('%A, %B %-d')}.\n\n{smart}"
             await context.bot.send_message(chat_id=chat_id, text=text)
-            _log_proactive("digest", text)
-            _bump_pings(1)
+            log_proactive("digest", text)
+            bump_pings(1)
             await _stale_sweep(context, chat_id)
             return
 
@@ -332,7 +355,6 @@ async def morning_digest(context):
         else:
             parts.append("\nNothing on the calendar today.")
 
-    due_today = [i for i in items if (d := memory.parse_dt(i["due_at"])) and d.date() <= now.date()]
     if due_today:
         parts.append("\nNeeds you today:")
         # a silent [:N] cutoff here once dropped two genuinely-due items off the
@@ -343,18 +365,9 @@ async def morning_digest(context):
             parts.append(f"  • {i['title']}")
         if rest:
             parts.append(f"  …+{len(rest)} more due today (say \"list\" to see everything)")
-    # "spare energy" is for flexible, undated backlog work she could get ahead
-    # on. Anything with a specific future due_at — a dinner reservation, trivia
-    # night, a Sunday-only recurring email, a reminder tied to a day later this
-    # week — can't be done early no matter how much energy she has, so it must
-    # never land here just because it happens to not be due *today*. A
-    # category blocklist (social/appointment only) isn't enough: a dated task
-    # in any other category (e.g. "ask boss to leave early" for a future day)
-    # slips right through it.
-    top = [i for i in items if i not in due_today and not i["due_at"]][:3]
-    if top:
+    if spare_energy:
         parts.append("\nIf there's spare energy:")
-        for i in top:
+        for i in spare_energy:
             parts.append(f"  • {i['title']}")
     if not items:
         parts.append("\nYour list is clear.")
@@ -362,8 +375,8 @@ async def morning_digest(context):
         parts.append(f"\n({len(items)} things safely on the list — say \"list\" anytime.)")
     text = "\n".join(parts)
     await context.bot.send_message(chat_id=chat_id, text=text)
-    _log_proactive("digest", text)
-    _bump_pings(1)
+    log_proactive("digest", text)
+    bump_pings(1)
     await _stale_sweep(context, chat_id)
 
 
@@ -376,8 +389,8 @@ async def _stale_sweep(context, chat_id):
         await context.bot.send_message(
             chat_id=chat_id, text=stale_text, reply_markup=checklist_markup(stale, max_buttons=len(stale))
         )
-        _log_proactive("digest", stale_text)
-        _bump_pings(1)
+        log_proactive("digest", stale_text)
+        bump_pings(1)
 
 
 async def evening_digest(context):
@@ -400,5 +413,5 @@ async def evening_digest(context):
     parts.append("\nAnything still in your head, drop it here before bed.")
     text = "\n".join(parts)
     await context.bot.send_message(chat_id=chat_id, text=text)
-    _log_proactive("digest", text)
-    _bump_pings(1)
+    log_proactive("digest", text)
+    bump_pings(1)

@@ -130,10 +130,15 @@ RECURRENCE_UNITS = ("daily", "weekly", "monthly", "yearly")
 
 
 def add_item(title, details="", category="task", priority=3, due_at=None, remind_at=None,
-             recurrence=None, recurrence_until=None, reminder_text=None) -> int:
+             recurrence=None, recurrence_until=None, reminder_text=None, _con=None) -> int:
     """remind_at is one ISO datetime, or several separated by ' | ' (e.g. night-before
     + day-of). Each becomes a one-shot row in `reminders` — a scheduled ping fires once
-    and does not itself start a nag chain (see due_nags / due_scheduled_reminders)."""
+    and does not itself start a nag chain (see due_nags / due_scheduled_reminders).
+
+    _con: an existing open connection to write on instead of opening a new one —
+    lets a caller (complete_item's recurrence respawn) fold this insert into its
+    own transaction so a crash mid-operation can't complete an item while losing
+    its next occurrence. Internal use only; regular callers never pass this."""
     if recurrence and recurrence not in RECURRENCE_UNITS:
         # an unrecognized unit must fail loudly, not silently store a value
         # _advance_date can't roll forward (which used to freeze due_at forever)
@@ -149,7 +154,8 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
         d, r = parse_dt(due_at), parse_dt(min(remind_times))
         if d and r:
             lead = max(0, int((d - r).total_seconds()))
-    with _c() as con:
+
+    def _insert(con):
         cur = con.execute(
             "INSERT INTO items (title, details, category, priority, due_at, created_at, recurrence,"
             " remind_lead_seconds, recurrence_until, reminder_text)"
@@ -161,6 +167,11 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
         for t in remind_times:
             con.execute("INSERT INTO reminders (item_id, fire_at) VALUES (?,?)", (item_id, t))
         return item_id
+
+    if _con is not None:
+        return _insert(_con)
+    with _c() as con:
+        return _insert(con)
 
 
 def _advance_date(dt: datetime, unit: str) -> datetime:
@@ -204,7 +215,14 @@ def complete_item(item_id):
     """Marks an item done. Cancels any not-yet-fired scheduled reminders (no
     posthumous pings). If it's recurring, immediately spawns the next
     occurrence (same lead between due date and reminder, rolled forward) —
-    unless recurrence_until has been passed, which ends the series."""
+    unless recurrence_until has been passed, which ends the series.
+
+    All of this happens in ONE transaction: the mark-done, the reminder
+    cleanup, and the recurrence respawn used to be two separate connections,
+    so a crash between them could complete an item and silently lose its next
+    occurrence — a recurring item just stops existing with no error. Folding
+    the respawn into the same `with _c()` block (via add_item's _con param)
+    makes the whole operation atomic — it either all happens or none of it does."""
     item = get_item(item_id)
     if not item or item["status"] != "open":
         return  # already done/dropped — a second ✅ tap must not double-spawn a recurrence
@@ -214,28 +232,29 @@ def complete_item(item_id):
             (now_iso(), item_id),
         )
         con.execute("DELETE FROM reminders WHERE item_id=? AND fired_at IS NULL", (item_id,))
-    if item["recurrence"] and item["due_at"]:
-        due = parse_dt(item["due_at"])
-        lead = item["remind_lead_seconds"]
-        if lead is None:  # pre-migration row: fall back to the live reminder, if sane
-            remind = parse_dt(item["next_remind_at"])
-            lead = int((due - remind).total_seconds()) if remind and remind <= due else 0
-        new_due = _advance_date(due, item["recurrence"])
-        until = parse_dt(item["recurrence_until"]) if "recurrence_until" in item.keys() else None
-        if until and new_due.date() > until.date():
-            return  # series has ended — don't spawn past the requested end date
-        new_remind = new_due - timedelta(seconds=lead)
-        add_item(
-            title=item["title"],
-            details=item["details"],
-            category=item["category"],
-            priority=item["priority"],
-            due_at=new_due.isoformat(timespec="seconds"),
-            remind_at=new_remind.isoformat(timespec="seconds"),
-            recurrence=item["recurrence"],
-            recurrence_until=item["recurrence_until"] if "recurrence_until" in item.keys() else None,
-            reminder_text=item["reminder_text"] if "reminder_text" in item.keys() else None,
-        )
+        if item["recurrence"] and item["due_at"]:
+            due = parse_dt(item["due_at"])
+            lead = item["remind_lead_seconds"]
+            if lead is None:  # pre-migration row: fall back to the live reminder, if sane
+                remind = parse_dt(item["next_remind_at"])
+                lead = int((due - remind).total_seconds()) if remind and remind <= due else 0
+            new_due = _advance_date(due, item["recurrence"])
+            until = parse_dt(item["recurrence_until"]) if "recurrence_until" in item.keys() else None
+            if until and new_due.date() > until.date():
+                return  # series has ended — don't spawn past the requested end date
+            new_remind = new_due - timedelta(seconds=lead)
+            add_item(
+                title=item["title"],
+                details=item["details"],
+                category=item["category"],
+                priority=item["priority"],
+                due_at=new_due.isoformat(timespec="seconds"),
+                remind_at=new_remind.isoformat(timespec="seconds"),
+                recurrence=item["recurrence"],
+                recurrence_until=item["recurrence_until"] if "recurrence_until" in item.keys() else None,
+                reminder_text=item["reminder_text"] if "reminder_text" in item.keys() else None,
+                _con=con,
+            )
 
 
 def open_items() -> list:

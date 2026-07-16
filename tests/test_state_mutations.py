@@ -246,14 +246,14 @@ class TestEveryPreferenceKeyValidates(unittest.TestCase):
         for key, bad in INVALID_VALUES.items():
             with self.subTest(key=key):
                 r = self.brain._run_tool("set_preference", {"key": key, "value": bad})
-                self.assertNotIn("updated", r.lower(), f"{key} accepted invalid value {bad!r}: {r}")
+                self.assertFalse(r.ok, f"{key} accepted invalid value {bad!r}: {r.message}")
                 self.assertIsNone(memory.get_setting("pref_" + key))
 
     def test_valid_values_are_accepted_and_persisted(self):
         for key, good in VALID_VALUES.items():
             with self.subTest(key=key):
                 r = self.brain._run_tool("set_preference", {"key": key, "value": good})
-                self.assertIn("updated", r.lower(), f"{key} rejected valid value {good!r}: {r}")
+                self.assertTrue(r.ok, f"{key} rejected valid value {good!r}: {r.message}")
                 self.assertEqual(memory.get_setting("pref_" + key), good)
 
 

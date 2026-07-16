@@ -10,7 +10,7 @@ import brain
 import gcal
 import memory
 from config import CLASSIFIER_MODEL, HARD_CAP_USD, GOOGLE_TOKEN, TZ
-from scheduler import _quiet, icon as deco_icon, item_buttons, pref
+from scheduler import quiet_now, icon as deco_icon, item_buttons, pref
 
 log = logging.getLogger("penny.gmail")
 
@@ -143,7 +143,7 @@ async def poll(context):
     if not emails:
         return
     triaged = await asyncio.to_thread(triage, emails)
-    quiet = _quiet(datetime.now(TZ))
+    quiet = quiet_now(datetime.now(TZ))
     urgent, needs_reply, deliveries = [], [], []
     for e in triaged:
         memory.mark_email(e["id"], e["sender"], e["subject"], e["summary"], e["kind"])
