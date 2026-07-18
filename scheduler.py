@@ -187,7 +187,7 @@ async def check_reminders(context):
             continue  # will fire right after quiet hours end
         due[r["id"]] = {"item": r, "kind": "scheduled", "reminder_id": r["reminder_id"]}
 
-    for it in memory.due_nags(now):
+    for it in memory.due_nags(now, grace_minutes_fn=escalation_minutes):
         if it["id"] in due:
             continue
         if quiet and it["priority"] < 5:

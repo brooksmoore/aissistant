@@ -326,6 +326,26 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
         due = memory.due_nags(now)
         self.assertEqual([d["id"] for d in due], [i])
 
+    def test_a_fired_scheduled_reminder_gets_the_full_escalation_grace_not_the_flat_one(self):
+        """Real incident (2026-07-18, jarvis): 'Reminder: Take clubs out of car'
+        fired on time at 6:00, and 'Nudge #1' fired 5 minutes later at 6:05 —
+        the flat grace window prevented the same-tick collision but still let
+        every on-time reminder get an unwanted follow-up nag moments later.
+        Once a scheduled reminder has actually fired for an item, the first
+        nag must be paced like every nag after it (the real per-priority
+        escalation interval — 6h at priority 3), not a flat few minutes."""
+        now = datetime.now(config.TZ)
+        due = (now - timedelta(minutes=6)).isoformat(timespec="seconds")  # past the old flat 5-min grace
+        pinged = memory.add_item("Take clubs out of car", due_at=due, remind_at=due, priority=3)
+        for r in memory.due_scheduled_reminders(now):
+            memory.mark_reminder_fired(r["reminder_id"])
+        never_pinged = memory.add_item("plain overdue, no reminder ever set", due_at=due, priority=3)
+        memory.delete_unfired_reminders(never_pinged)
+
+        due_ids = [d["id"] for d in memory.due_nags(now, grace_minutes_fn=self.scheduler.escalation_minutes)]
+        self.assertNotIn(pinged, due_ids)     # already pinged on time — full 6h escalation grace applies
+        self.assertIn(never_pinged, due_ids)  # never pinged at all — short flat grace still applies
+
     def test_stale_item_appears_in_morning_digest_with_buttons(self):
         now = datetime.now(config.TZ)
         long_past = (now - timedelta(hours=30)).isoformat(timespec="seconds")

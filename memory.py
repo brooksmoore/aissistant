@@ -267,7 +267,15 @@ def open_items() -> list:
 NAG_FIRST_GRACE_MINUTES = 5  # see due_nags() — keeps a same-time reminder+nag from stacking
 
 
-def due_nags(now: datetime) -> list:
+def _had_a_fired_reminder(item_id) -> bool:
+    with _c() as con:
+        row = con.execute(
+            "SELECT 1 FROM reminders WHERE item_id=? AND fired_at IS NOT NULL LIMIT 1", (item_id,)
+        ).fetchone()
+    return row is not None
+
+
+def due_nags(now: datetime, grace_minutes_fn=None) -> list:
     """Open items whose due_at has passed and are due for another nag ping —
     the repeating 'still not done' chase. Separate from one-shot scheduled
     reminders (due_scheduled_reminders): a nag only starts once an item is
@@ -279,7 +287,10 @@ def due_nags(now: datetime) -> list:
     on purpose at the max-nags cap, the priority-1 one-shot case, and the 24h
     NAG_WINDOW cutoff). Treating both as "eligible now" turned every one of
     those intentional stops into an every-60-seconds nag storm instead —
-    confirmed live (an item nagged 13+ times a minute apart)."""
+    confirmed live (an item nagged 13+ times a minute apart).
+
+    grace_minutes_fn(priority) -> minutes, if given, paces the FIRST nag on an
+    item that already had a scheduled reminder fire — see the comment below."""
     with _c() as con:
         rows = con.execute(
             "SELECT * FROM items WHERE status='open' AND due_at IS NOT NULL"
@@ -291,14 +302,28 @@ def due_nags(now: datetime) -> list:
             continue
         if r["remind_count"] > 0 and not r["next_remind_at"]:
             continue  # nagging was deliberately stopped — never re-select
-        # a scheduled reminder is often set for the exact due moment — without
-        # a short grace window, the very next minute's tick already sees the
-        # item as "overdue" and fires the first nag seconds later, doubling up
-        # on the scheduled ping (confirmed live: reminder at 12:00, Nudge #1 at
-        # 12:01 for the same item). Only the very first nag needs this pause —
-        # once remind_count>0 the item is already paced by next_remind_at.
-        if r["remind_count"] == 0 and (now - d).total_seconds() < NAG_FIRST_GRACE_MINUTES * 60:
-            continue
+        if r["remind_count"] == 0:
+            # A scheduled reminder is often set for the exact due moment. A
+            # flat few-minute grace only prevented the same-TICK collision
+            # (reminder at 12:00, Nudge #1 at 12:01) — but it also meant
+            # EVERY on-time reminder got a follow-up nag a few minutes later
+            # regardless of priority, since the flat grace ran out on the
+            # very next check after it elapsed. Confirmed live (2026-07-18,
+            # jarvis): "Reminder: Take clubs out of car" at 6:00, "Nudge #1"
+            # at 6:05 — technically a different tick than the original 60-
+            # second collision, but the same unwanted double-ping. If a
+            # scheduled reminder already fired for this item, the first nag
+            # should be paced like every nag after it (grace_minutes_fn,
+            # i.e. the real per-priority escalation interval) — not a flat
+            # few minutes. Items that were never pinged at all (no scheduled
+            # reminder fired) keep the short flat grace; they still need to
+            # nag reasonably soon once overdue.
+            if grace_minutes_fn and _had_a_fired_reminder(r["id"]):
+                grace = grace_minutes_fn(r["priority"])
+            else:
+                grace = NAG_FIRST_GRACE_MINUTES
+            if (now - d).total_seconds() < grace * 60:
+                continue
         nxt = parse_dt(r["next_remind_at"])
         if nxt and nxt > now:
             continue  # already nagged, waiting for the next escalation interval
