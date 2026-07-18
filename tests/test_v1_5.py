@@ -543,6 +543,84 @@ class TestEmptyPromiseGuardPatternMatcher(unittest.TestCase):
                 self.assertFalse(self.brain.claims_change(text), f"should NOT have matched: {text!r}")
 
 
+class _FakeTextBlock:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.content = [_FakeTextBlock(text)]
+        self.usage = object()
+        self.stop_reason = "end_turn"
+
+
+class TestEmptyPromiseGuardCatchesSecondHollowClaim(unittest.TestCase):
+    """Real incident (2026-07-18, jarvis): the guard's own one-shot corrective
+    retry produced a second hollow claim ("You're back to 25/100 — next
+    reminder at 5:02pm") with no tool call behind it either, three separate
+    times in one conversation. Nothing re-checked the do-over, so the second
+    lie reached her uncaught. The fix re-applies the same check to the
+    corrective retry's own reply and, if it's still just talk, replaces it
+    with an honest failure message instead of forwarding it."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        self.brain = brain
+        memory.set_setting("owner_chat_id", "12345")
+
+    def test_second_hollow_claim_is_replaced_with_honest_fallback(self):
+        calls = [
+            _FakeResp("Nice — logged 25/100 pushups done today. Next check-in at 6pm."),
+            _FakeResp("You're back to 25/100 pushups done today — next reminder at 5:02pm."),
+        ]
+        orig_create = self.brain.client.messages.create
+        orig_llm_judge = self.brain.llm_claims_change
+        self.brain.client.messages.create = lambda **kw: calls.pop(0)
+        self.brain.llm_claims_change = lambda text: True  # simulates the real incident: only the LLM judge layer caught these phrasings, not the regex
+        try:
+            reply = self.brain.respond("done with 25 pushups")
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_llm_judge
+        self.assertNotIn("25/100", reply)
+        self.assertIn("didn't actually save", reply)
+
+    def test_corrective_retry_that_actually_acts_is_trusted(self):
+        item_id = memory.add_item("Do 100 pushups", reminder_text="0/100 pushups done today")
+
+        class _ToolUseBlock:
+            def __init__(self):
+                self.type = "tool_use"
+                self.id = "toolu_1"
+                self.name = "update_item"
+                self.input = {"item_id": item_id, "reminder_text": "25/100 pushups done today"}
+
+        class _RespWithToolCall:
+            def __init__(self):
+                self.content = [_ToolUseBlock(), _FakeTextBlock("Logged — 25/100 for real this time.")]
+                self.usage = object()
+                self.stop_reason = "end_turn"
+
+        calls = [
+            _FakeResp("Nice — logged 25/100 pushups done today."),
+            _RespWithToolCall(),
+        ]
+        orig_create = self.brain.client.messages.create
+        orig_llm_judge = self.brain.llm_claims_change
+        self.brain.client.messages.create = lambda **kw: calls.pop(0)
+        self.brain.llm_claims_change = lambda text: True
+        try:
+            reply = self.brain.respond("done with 25 pushups")
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_llm_judge
+        self.assertNotIn("didn't actually save", reply)
+        self.assertEqual(memory.get_item(item_id)["reminder_text"], "25/100 pushups done today")
+
+
 class TestAckShortcutRegex(unittest.TestCase):
     def setUp(self):
         import bot

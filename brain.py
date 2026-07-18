@@ -684,6 +684,16 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         resp = _create(messages)
         _execute_tool_calls(resp.content)
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        # Real incident (2026-07-18, jarvis): the corrective round-trip itself
+        # produced a second hollow claim ("You're back to 25/100 — next
+        # reminder at 5:02pm") with no tool call behind it either, three
+        # times in one conversation, and that second lie went straight to
+        # her uncaught since nothing re-checked the do-over. One retry is
+        # all this guard spends — if it's still just talk, don't forward a
+        # second hallucinated confirmation; say so plainly instead.
+        if text and not captured and not did and (claims_change(text) or llm_claims_change(text)):
+            log.warning("empty-promise guard tripped AGAIN on the corrective retry (incident #%d today): %r", n, text[:600])
+            text = "That didn't actually save on my end — mind sending it again?"
 
     # Capture-completeness check: a long message that saved at least one item
     # gets a cheap second look for siblings the model missed ("a rambling
