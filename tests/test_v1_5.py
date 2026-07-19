@@ -606,7 +606,7 @@ class TestEmptyPromiseGuardCatchesSecondHollowClaim(unittest.TestCase):
             self.brain.client.messages.create = orig_create
             self.brain.llm_claims_change = orig_llm_judge
         self.assertNotIn("25/100", reply)
-        self.assertIn("didn't actually save", reply)
+        self.assertIn("not adding up", reply)
 
     def test_corrective_retry_that_actually_acts_is_trusted(self):
         item_id = memory.add_item("Do 100 pushups", reminder_text="0/100 pushups done today")
@@ -637,7 +637,7 @@ class TestEmptyPromiseGuardCatchesSecondHollowClaim(unittest.TestCase):
         finally:
             self.brain.client.messages.create = orig_create
             self.brain.llm_claims_change = orig_llm_judge
-        self.assertNotIn("didn't actually save", reply)
+        self.assertNotIn("not adding up", reply)
         self.assertEqual(memory.get_item(item_id)["reminder_text"], "25/100 pushups done today")
 
 

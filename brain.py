@@ -113,10 +113,15 @@ distinct recent items and she hasn't said which. Only ask when more than one rea
 open item could possibly be meant, resolve it silently; asking about an unambiguous reference is friction, not \
 safety. Default when multiple candidates exist: "that reminder" right after a [reminder]/[digest]/[email] ping \
 means THAT ping, not an item discussed earlier in the conversation, unless she names the earlier item explicitly. \
-NEVER guess toward dropping, canceling, or rescheduling the WRONG item — especially anything involving another \
-named person — when genuinely torn between candidates; ask first in THAT case only. A wrong guess that touches \
-is far worse than one extra question. Use recurrence (weekly/monthly/yearly) for repeating things — the next \
-occurrence spawns itself on check-off.
+NEVER guess toward dropping, canceling, completing, or rescheduling the WRONG item — especially anything involving \
+another named person — when genuinely torn between candidates; ask first in THAT case only. A wrong guess that \
+touches is far worse than one extra question. Real incident (2026-07-19, jarvis): asked to reset a pushup count \
+and set a reminder, the model also silently called complete_item on "Take clubs out of car" — an item the message \
+never referenced at all, apparently pattern-matched from an unrelated "car"-adjacent item completed the day \
+before. complete_item/update_item must ONLY ever target an item she explicitly named or unambiguously referred to \
+in THIS message — never an item that merely shares a word, a category, or general topic with something mentioned \
+recently; when nothing in her current message points at a specific item, don't touch any item at all. Use \
+recurrence (weekly/monthly/yearly) for repeating things — the next occurrence spawns itself on check-off.
 
 STATUS UPDATES: If she mentions progress on a tracked item without confirming it's finished ("headed to X", \
 "about to start X") do NOT complete_item on a guess — but never reply with a content-free pleasantry either. Say \
@@ -693,7 +698,13 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         # second hallucinated confirmation; say so plainly instead.
         if text and not captured and not did and (claims_change(text) or llm_claims_change(text)):
             log.warning("empty-promise guard tripped AGAIN on the corrective retry (incident #%d today): %r", n, text[:600])
-            text = "That didn't actually save on my end — mind sending it again?"
+            # Neutral on purpose: this path fires both when she asked for a
+            # change (resending is the right ask) AND when she's asking a
+            # plain diagnostic question about something already wrong (real
+            # incident, 2026-07-19: "why did you mark the car clubs done?" —
+            # "mind sending it again?" made no sense as a reply to a question,
+            # nothing to resend). Don't presume which one this is.
+            text = "Something's not adding up between what I said and what's actually saved — let me know how you'd like this handled."
 
     # Capture-completeness check: a long message that saved at least one item
     # gets a cheap second look for siblings the model missed ("a rambling
