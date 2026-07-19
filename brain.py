@@ -390,6 +390,20 @@ def _run_tool(name: str, inp: dict) -> ToolResult:
                 fields["recurrence"] = None
             if fields.get("recurrence_until") == "":
                 fields["recurrence_until"] = None
+            if "title" in fields and "reminder_text" not in fields:
+                # Items with a custom reminder_text (the "N/100 done today"
+                # progress-tracking pattern) keep title and reminder_text
+                # mirrored by convention — the scheduler shows reminder_text
+                # over title at ping time, so a title-only update silently
+                # freezes the actual reminder wording. Real incident
+                # (2026-07-19, jarvis): "Did 25 pushups" updated the title to
+                # "25/100..." but left reminder_text at "0/100...", so the
+                # next reminder still showed the stale count. Code-level
+                # guard, not a prompt instruction — the same divergence has
+                # now happened twice despite prompt wording alone.
+                current = memory.get_item(inp["item_id"])
+                if current and current["reminder_text"]:
+                    fields["reminder_text"] = fields["title"]
             if fields:
                 memory.update_item(inp["item_id"], **fields)
             if remind_at is not None:

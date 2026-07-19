@@ -364,6 +364,39 @@ class TestMalleability(unittest.TestCase):
         contents = [f["content"] for f in memory.all_facts()]
         self.assertEqual(contents, ["Her birthday is July 17"])
 
+    def test_title_only_update_mirrors_into_reminder_text_when_one_is_set(self):
+        """Real incident (2026-07-19, jarvis): 'Did 25 pushups' updated the
+        item's title to '25/100 pushups done today' but left reminder_text
+        at the stale '0/100...' — the scheduler shows reminder_text over
+        title at ping time, so the next reminder still showed 0/100 despite
+        the title being correct. Items using this custom-wording pattern keep
+        title and reminder_text mirrored; a title-only update must not be
+        allowed to desync them."""
+        i = memory.add_item("0/100 pushups done today", reminder_text="0/100 pushups done today")
+        self.brain._run_tool("update_item", {"item_id": i, "title": "25/100 pushups done today"})
+        item = memory.get_item(i)
+        self.assertEqual(item["title"], "25/100 pushups done today")
+        self.assertEqual(item["reminder_text"], "25/100 pushups done today")
+
+    def test_title_only_update_leaves_reminder_text_alone_when_it_was_never_set(self):
+        """An ordinary item with no custom reminder_text must not have one
+        invented just because its title changed."""
+        i = memory.add_item("Renew registration")
+        self.brain._run_tool("update_item", {"item_id": i, "title": "Renew car registration"})
+        item = memory.get_item(i)
+        self.assertEqual(item["title"], "Renew car registration")
+        self.assertIsNone(item["reminder_text"])
+
+    def test_explicit_reminder_text_update_is_never_overridden(self):
+        """When both are given explicitly, the caller's reminder_text wins —
+        the mirroring only fills in a gap, never overrides an explicit value."""
+        i = memory.add_item("0/100 pushups done today", reminder_text="0/100 pushups done today")
+        self.brain._run_tool("update_item", {
+            "item_id": i, "title": "25/100 pushups done today",
+            "reminder_text": "custom wording, do not touch",
+        })
+        self.assertEqual(memory.get_item(i)["reminder_text"], "custom wording, do not touch")
+
 
 class TestCostControls(unittest.TestCase):
     """Routing, breaker tiers, and cache-stable history windows."""
