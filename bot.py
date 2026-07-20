@@ -33,6 +33,7 @@ from config import (
     EVENING_DIGEST,
     LOG_PATH,
     MORNING_DIGEST,
+    OWNER_PRONOUN_SUBJ,
     PAIRING_CODE,
     TELEGRAM_TOKEN,
     TZ,
@@ -191,7 +192,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f = await photo.get_file()
         data = await f.download_as_bytearray()
         b64 = base64.standard_b64encode(bytes(data)).decode()
-        caption = update.message.caption or "(she sent this screenshot/photo — figure out what matters in it and capture anything actionable)"
+        caption = update.message.caption or (
+            f"({OWNER_PRONOUN_SUBJ} sent this screenshot/photo — figure out what matters in it and capture anything actionable)"
+        )
         reply = await asyncio.to_thread(brain.respond, caption, b64, "image/jpeg")
     except Exception:
         log.exception("photo handling failed")

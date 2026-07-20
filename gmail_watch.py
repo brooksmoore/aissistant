@@ -9,7 +9,7 @@ from datetime import datetime
 import brain
 import gcal
 import memory
-from config import CLASSIFIER_MODEL, HARD_CAP_USD, GOOGLE_TOKEN, TZ
+from config import CLASSIFIER_MODEL, HARD_CAP_USD, GOOGLE_TOKEN, OWNER_PRONOUN_OBJ, OWNER_PRONOUN_POSS, TZ
 from scheduler import quiet_now, icon as deco_icon, item_buttons, pref
 
 log = logging.getLogger("penny.gmail")
@@ -64,26 +64,27 @@ def fetch_new() -> list:
     return out
 
 
-TRIAGE_PROMPT = """You triage a personal (non-work) email inbox for a busy woman with anxiety. \
+TRIAGE_PROMPT = f"""You triage a personal (non-work) email inbox for a busy person. \
 For each email below, classify it:
 
 - "urgent": time-sensitive and personally important (appointment change, payment problem, someone needs an answer today)
-- "needs_reply": a real person is waiting on a response from her
+- "needs_reply": a real person is waiting on a response from {OWNER_PRONOUN_OBJ}
 - "delivery": package/order/shipping updates (Amazon etc.)
 - "fyi": mildly useful info, no action
 - "ignore": marketing, newsletters, promos, notifications nobody reads
 
 Mailing lists, neighborhood platforms (Nextdoor and the like), newsletters, and automated/no-reply senders are \
 NEVER "urgent" or "needs_reply" — regardless of how emotional or urgent-sounding the content is. "needs_reply" \
-strictly means one individual person personally addressing HER by name or context, not a broadcast post. \
-Example: a Nextdoor neighborhood post announcing a death in the community is heartfelt but is "fyi" at most — \
-it is not a person waiting on a reply from her, and its raw text must never become a task on her list.
+strictly means one individual person personally addressing {OWNER_PRONOUN_OBJ.upper()} by name or context, not a \
+broadcast post. Example: a Nextdoor neighborhood post announcing a death in the community is heartfelt but is \
+"fyi" at most — it is not a person waiting on a reply from {OWNER_PRONOUN_OBJ}, and its raw text must never \
+become a task on {OWNER_PRONOUN_POSS} list.
 
 For each email also write "topic": a neutral 3-6 word summary suitable as a task title (never the raw subject \
 or preview verbatim — especially never verbatim distressing/personal content from someone else's message).
 
 Reply with ONLY a JSON array like:
-[{"id": "...", "kind": "urgent|needs_reply|delivery|fyi|ignore", "summary": "one short human sentence", "topic": "3-6 word neutral topic"}]
+[{{"id": "...", "kind": "urgent|needs_reply|delivery|fyi|ignore", "summary": "one short human sentence", "topic": "3-6 word neutral topic"}}]
 
 Emails:
 """

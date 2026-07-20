@@ -4,7 +4,7 @@ import sys
 from datetime import datetime, timedelta
 
 import memory
-from config import DAILY_BUDGET_USD, TZ
+from config import ASSISTANT_NAME, DAILY_BUDGET_USD, OWNER_PRONOUN_OBJ, OWNER_PRONOUN_POSS, TZ
 
 
 def main(days=7):
@@ -48,8 +48,8 @@ def main(days=7):
     total_pings = sum(int(r["value"]) for r in ping_rows)
     total_incidents = sum(int(r["value"]) for r in incident_rows)
     avg_pings = total_pings / max(len(ping_rows), 1)
-    print(f"=== Penny report — last {days} days ===")
-    print(f"Conversations: {turns} messages from her across {active_days} active day(s)")
+    print(f"=== {ASSISTANT_NAME} report — last {days} days ===")
+    print(f"Conversations: {turns} messages from {OWNER_PRONOUN_OBJ} across {active_days} active day(s)")
     print(f"Items: {created} captured, {completed} completed, {open_now} open now ({overdue} overdue)")
     print(f"Facts known: {facts}")
     print(f"Incidents (glitch/failed-save replies): {glitches}")
@@ -60,7 +60,8 @@ def main(days=7):
     print(f"Spend: ${total_spend:.3f} total, avg ${total_spend / max(days, 1):.3f}/day (cap ${DAILY_BUDGET_USD:.2f}/day)")
     for r in spend_rows:
         print(f"  {r['key'][6:]}: ${float(r['value']):.3f}")
-    print("Her preferences: " + (", ".join(f"{r['key'][5:]}={r['value']}" for r in prefs) or "(defaults)"))
+    print(f"{OWNER_PRONOUN_POSS.capitalize()} preferences: "
+          + (", ".join(f"{r['key'][5:]}={r['value']}" for r in prefs) or "(defaults)"))
 
 
 if __name__ == "__main__":

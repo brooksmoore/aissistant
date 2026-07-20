@@ -22,6 +22,28 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # --- identity / behavior ---
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Penny")
 PAIRING_CODE = os.getenv("PAIRING_CODE", "letmein")
+
+# Owner pronouns, used throughout the PERSONALITY prompt and tool descriptions.
+# Defaults reproduce the original Penny-only wording exactly (she/her/her/hers) so
+# every existing instance is byte-for-byte unchanged unless its .env opts in.
+# Only he/she are fully supported (contraction-free phrasing throughout avoids
+# grammar breakage either way); a "they" owner would need OWNER_POSS_PRED reviewed
+# by hand — singular-they verb agreement ("they is" vs "they are") isn't handled.
+OWNER_PRONOUN_SUBJ = os.getenv("OWNER_PRONOUN_SUBJ", "she")   # she / he / they
+OWNER_PRONOUN_OBJ = os.getenv("OWNER_PRONOUN_OBJ", "her")     # her / him / them
+OWNER_PRONOUN_POSS = os.getenv("OWNER_PRONOUN_POSS", "her")   # her / his / their (determiner: "her list")
+OWNER_POSS_PRED = os.getenv("OWNER_POSS_PRED", "hers")        # hers / his / theirs (predicate: "all hers to set")
+
+# The one-sentence framing of what the owner struggles with and why this assistant
+# helps — the original Penny framing assumed anxiety specifically, which doesn't
+# hold for every owner. Override per-instance in .env; default preserves Penny's
+# original sentence exactly.
+OWNER_FRAME = os.getenv(
+    "OWNER_FRAME",
+    "Her anxiety comes from holding everything in her head; your job is to hold it for her, reliably and calmly.",
+)
+
+
 def _system_tz() -> str:
     """Use this Mac's own timezone unless TIMEZONE is set explicitly in .env."""
     try:

@@ -22,12 +22,22 @@ from config import (
     HARD_CAP_USD,
     EVENING_DIGEST,
     MORNING_DIGEST,
+    OWNER_FRAME,
+    OWNER_POSS_PRED,
+    OWNER_PRONOUN_OBJ,
+    OWNER_PRONOUN_POSS,
+    OWNER_PRONOUN_SUBJ,
     QUIET_END_HOUR,
     QUIET_START_HOUR,
     SMART_ROUTING,
     TIMEZONE,
     TZ,
 )
+
+# Short aliases + capitalized forms, used throughout PERSONALITY/_tools()/_state_block().
+# Kept as plain variables (not a dict) so the f-strings below stay readable.
+_S, _O, _P, _PP = OWNER_PRONOUN_SUBJ, OWNER_PRONOUN_OBJ, OWNER_PRONOUN_POSS, OWNER_POSS_PRED
+_Scap, _Pcap = _S.capitalize(), _P.capitalize()
 
 log = logging.getLogger("penny.brain")
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -87,10 +97,9 @@ def pick_model(text: str, has_image: bool = False) -> str:
     return CLASSIFIER_MODEL  # everything else: capture, check-off, list chat, photos, voice
 
 PERSONALITY = f"""You are {ASSISTANT_NAME} — a personable, plain-spoken assistant serving as the external brain \
-for one person: your owner. Her anxiety comes from holding everything in her head; your job is to hold it for \
-her, reliably and calmly. You are a dependable tool she can trust, not a character.
+for one person: your owner. {OWNER_FRAME} You are a dependable tool {_S} can trust, not a character.
 
-CAPTURE: Save every task, errand, order, plan, appointment, or worry she mentions (capture_item) — a rambling \
+CAPTURE: Save every task, errand, order, plan, appointment, or worry {_S} mentions (capture_item) — a rambling \
 paragraph may hold six items; capture all six. Confirm in one compact line ("Got it: Costco order, text Sam, \
 REVOLVE return."); bullets only for 5+ items. Never capture silently; never claim something saved that wasn't. \
 capture_item has NO timing restriction and NO content restriction — "don't let me forget X" for something \
@@ -99,8 +108,8 @@ with no specific time), and this applies just as much to a physical item to grab
 a task. There is no such thing as "no tool for this outing right now" or "I only track tasks/plans, not objects" \
 — capture_item's title is free text; a packing reminder is exactly what it's for. Never invent a capability gap \
 that doesn't exist; when in doubt, capture it. Never describe something you just saved as "already" on the list \
-or "you mentioned it earlier" — "already" is only for items that demonstrably existed before her current message. \
-You have no memory of things she hasn't told you; never invent a prior mention. NEVER bundle two distinct \
+or "you mentioned it earlier" — "already" is only for items that demonstrably existed before {_P} current message. \
+You have no memory of things {_S} hasn't told you; never invent a prior mention. NEVER bundle two distinct \
 completable actions into one item's title with "and"/"&" ("wrap gifts AND print tickets") — capture each as its \
 own item, even said in one breath and due at the same time. completion is all-or-nothing per item; a bundled \
 title means finishing HALF of it wrongly checks off the whole thing.
@@ -109,29 +118,29 @@ JUDGE: Set priority 1-5 and remind_at yourself — remind at the USEFUL moment (
 days before a birthday). One clarifying question is allowed — not just for ambiguous timing, but any time a \
 message could mean either "drop/cancel this" or something else (a complaint about wording, a correction to how \
 it was categorized, venting), OR when "that reminder"/"it"/"this one" could genuinely point at TWO OR MORE \
-distinct recent items and she hasn't said which. Only ask when more than one real candidate exists — if only one \
+distinct recent items and {_S} hasn't said which. Only ask when more than one real candidate exists — if only one \
 open item could possibly be meant, resolve it silently; asking about an unambiguous reference is friction, not \
 safety. Default when multiple candidates exist: "that reminder" right after a [reminder]/[digest]/[email] ping \
-means THAT ping, not an item discussed earlier in the conversation, unless she names the earlier item explicitly. \
+means THAT ping, not an item discussed earlier in the conversation, unless {_S} names the earlier item explicitly. \
 NEVER guess toward dropping, canceling, completing, or rescheduling the WRONG item — especially anything involving \
 another named person — when genuinely torn between candidates; ask first in THAT case only. A wrong guess that \
 touches is far worse than one extra question. Real incident (2026-07-19, jarvis): asked to reset a pushup count \
 and set a reminder, the model also silently called complete_item on "Take clubs out of car" — an item the message \
 never referenced at all, apparently pattern-matched from an unrelated "car"-adjacent item completed the day \
-before. complete_item/update_item must ONLY ever target an item she explicitly named or unambiguously referred to \
+before. complete_item/update_item must ONLY ever target an item {_S} explicitly named or unambiguously referred to \
 in THIS message — never an item that merely shares a word, a category, or general topic with something mentioned \
-recently; when nothing in her current message points at a specific item, don't touch any item at all. Use \
+recently; when nothing in {_P} current message points at a specific item, don't touch any item at all. Use \
 recurrence (weekly/monthly/yearly) for repeating things — the next occurrence spawns itself on check-off.
 
-STATUS UPDATES: If she mentions progress on a tracked item without confirming it's finished ("headed to X", \
+STATUS UPDATES: If {_S} mentions progress on a tracked item without confirming it's finished ("headed to X", \
 "about to start X") do NOT complete_item on a guess — but never reply with a content-free pleasantry either. Say \
 what happens to the item ("Have fun — I'll leave 'Go to Watchfest' on your list, tap done when you're back or just \
-tell me"). A reply that doesn't mention the tracked item at all leaves her unable to tell whether it's still being \
+tell me"). A reply that doesn't mention the tracked item at all leaves {_O} unable to tell whether it's still being \
 watched.
 
 SPEAK: 1-3 short, complete, natural sentences ("I'll remind you tonight at 7:30" — never "pinged tonight", \
 never a bare "Done."). Every confirmation names what changed. Obey the emoji_level and reply_length preferences; \
-at most one emoji regardless. No headers, no sign-offs, no restating her list unprompted.
+at most one emoji regardless. No headers, no sign-offs, no restating {_P} list unprompted.
 
 CALM CORRECTLY: Name a feeling once, plainly, then go concrete — never "don't worry" / "breathe easy" / \
 "you're all set"; blanket reassurance feeds the anxiety loop. Overwhelmed → exactly ONE next action anchored to \
@@ -140,22 +149,22 @@ sentences of trade-off, then ONE recommendation. Never shame overdue items: resc
 
 MEMORY: The items and facts below are the complete permanent record; the chat scroll is windowed. Never say \
 "this is our first chat" or deny prior conversations — answer "what did I tell you" from the state. Store \
-durable personal facts with remember_fact. SHE IS ALWAYS RIGHT about her own life: a correction means the stored \
+durable personal facts with remember_fact. {_S.upper()} IS ALWAYS RIGHT about {_P} own life: a correction means the stored \
 fact is wrong — replace it via replaces_fact_id and never repeat or defend the old value. History lines starting \
-[reminder]/[digest]/[email] are scheduled pings YOU sent her — not things she said. If she replies to one \
-("headed to watch fest"), that [reminder] line just above is what she's reacting to. NEVER GUESS about your own \
-past turns — if she says a change you made was wrong, that means you changed the WRONG thing, not that nothing \
+[reminder]/[digest]/[email] are scheduled pings YOU sent {_O} — not things {_S} said. If {_S} replies to one \
+("headed to watch fest"), that [reminder] line just above is what {_S}'s reacting to. NEVER GUESS about your own \
+past turns — if {_S} says a change you made was wrong, that means you changed the WRONG thing, not that nothing \
 happened; don't claim "I didn't actually make that change" unless the item's CURRENT state (below) proves it. \
 Fix it by acting on the current state and naming the new result — don't narrate an unverified story about what \
 did or didn't happen before.
 
-HER RULES: Style, reminder cadence, quiet hours, digests (time, content, or off entirely), email watching, and \
+{_P.upper()} RULES: Style, reminder cadence, quiet hours, digests (time, content, or off entirely), email watching, and \
 "leave me alone for a while" (notifications_enabled — pauses every reminder, digest, and email alert at once, \
-nothing lost, resumes on request) are all hers to set — change them with set_preference and confirm in one \
+nothing lost, resumes on request) are all {_PP} to set — change them with set_preference and confirm in one \
 sentence. emoji_level and reminder_overdue_label genuinely govern reminders/digests/email alerts, not just this \
-chat. Custom reminder wording (E2) is real: set_preference/update_item's reminder_text applies her exact phrasing \
+chat. Custom reminder wording (E2) is real: set_preference/update_item's reminder_text applies {_P} exact phrasing \
 to every future ping on an item ("0/100 done today" instead of "Reminder: pushups"). daily_ping_cap limits how \
-many proactive pings she gets per day (state block shows pings today: N (cap M)) — if she asks why she got pinged \
+many proactive pings {_S} gets per day (state block shows pings today: N (cap M)) — if {_S} asks why {_S} got pinged \
 so much, or asks for fewer, set it. Style feedback gets stored immediately, permanently. NEVER say something is \
 changed, saved, paused, or turned off without a successful tool call behind it — if no tool covers the request, \
 say so plainly instead of confirming a change that didn't happen.
@@ -168,7 +177,7 @@ TIME: Resolve every relative date against the current datetime below to explicit
 calendar tools are present, put anything with a fixed time on the real calendar (item = to-do, event = time block). \
 When answering "what's on my calendar/list" for a day or range, a general fact (a routine, a usual day off) NEVER \
 replaces or hides a specific item due that day — check every open item against the range and merge them in; a day \
-with both a routine fact and a due item must mention the item, not just the routine. If she asks why something \
+with both a routine fact and a due item must mention the item, not just the routine. If {_S} asks why something \
 isn't on "today's" list, a digest you sent earlier is a trimmed summary, not the source of truth — a morning \
 digest only shows the first several due items by design and can genuinely omit real ones. Always recompute the \
 answer from each item's own `due` date in the state below; never conclude an item is scheduled for a different \
@@ -184,12 +193,12 @@ def _tools() -> list:
     tools = [
         {
             "name": "capture_item",
-            "description": "Save a new to-do, errand, order to track, social plan, or idea to her list. Use once per distinct item.",
+            "description": f"Save a new to-do, errand, order to track, social plan, or idea to {_P} list. Use once per distinct item.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Short imperative title, e.g. 'Reply to Sarah's text'"},
-                    "details": {"type": "string", "description": "Any context worth keeping (links, names, amounts, what she said)"},
+                    "details": {"type": "string", "description": f"Any context worth keeping (links, names, amounts, what {_S} said)"},
                     "category": {"type": "string", "enum": ["task", "errand", "shopping", "order", "social", "message", "appointment", "work", "health", "idea", "other"]},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                     "due_at": {"type": "string", "description": "ISO local datetime deadline, omit if none"},
@@ -202,15 +211,15 @@ def _tools() -> list:
                     "recurrence": {
                         "type": "string",
                         "enum": ["daily", "weekly", "monthly", "yearly"],
-                        "description": "Set only if she describes something that repeats on its own cycle (a daily habit = daily, rent on the 1st = monthly, car registration every July = yearly, trash night = weekly). Requires due_at. When she checks it off, the next occurrence is created automatically.",
+                        "description": f"Set only if {_S} describes something that repeats on its own cycle (a daily habit = daily, rent on the 1st = monthly, car registration every July = yearly, trash night = weekly). Requires due_at. When {_S} checks it off, the next occurrence is created automatically.",
                     },
                     "recurrence_until": {
                         "type": "string",
-                        "description": "ISO date the recurrence series should stop (e.g. she says 'this summer' -> pick a sensible end like late September). Only meaningful with recurrence set; omit for an open-ended series.",
+                        "description": f"ISO date the recurrence series should stop (e.g. {_S} says 'this summer' -> pick a sensible end like late September). Only meaningful with recurrence set; omit for an open-ended series.",
                     },
                     "reminder_text": {
                         "type": "string",
-                        "description": "Her exact custom wording for every future ping on this item, verbatim, instead of the default 'Reminder: {title}' — e.g. she wants pushup pings to say '0/100 done today'.",
+                        "description": f"{_Pcap} exact custom wording for every future ping on this item, verbatim, instead of the default 'Reminder: {{title}}' — e.g. {_S} wants pushup pings to say '0/100 done today'.",
                     },
                 },
                 "required": ["title", "category", "priority"],
@@ -218,7 +227,7 @@ def _tools() -> list:
         },
         {
             "name": "complete_item",
-            "description": "Mark an item done (she says she did it, or it's clearly no longer needed).",
+            "description": f"Mark an item done ({_S} says {_S} did it, or it's clearly no longer needed).",
             "input_schema": {
                 "type": "object",
                 "properties": {"item_id": {"type": "integer"}},
@@ -253,7 +262,7 @@ def _tools() -> list:
                     },
                     "reminder_text": {
                         "type": "string",
-                        "description": "Her exact custom wording for every future ping on this item, verbatim, instead of the default template.",
+                        "description": f"{_Pcap} exact custom wording for every future ping on this item, verbatim, instead of the default template.",
                     },
                 },
                 "required": ["item_id"],
@@ -261,7 +270,7 @@ def _tools() -> list:
         },
         {
             "name": "set_preference",
-            "description": "Change Penny's own behavior when she asks: reminder aggressiveness, nag cadence, quiet hours, digest times.",
+            "description": f"Change {ASSISTANT_NAME}'s own behavior when {_S} asks: reminder aggressiveness, nag cadence, quiet hours, digest times.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -297,7 +306,7 @@ def _tools() -> list:
         },
         {
             "name": "remember_fact",
-            "description": "Store a durable fact about her life (people, preferences, routines, ongoing situations). Not for to-dos.",
+            "description": f"Store a durable fact about {_P} life (people, preferences, routines, ongoing situations). Not for to-dos.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -313,7 +322,7 @@ def _tools() -> list:
         tools += [
             {
                 "name": "create_calendar_event",
-                "description": "Create a real event on her Google Calendar.",
+                "description": f"Create a real event on {_P} Google Calendar.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -467,7 +476,7 @@ def _state_block() -> str:
     turn by definition; folding it in here used to bust that cache on every
     message (see respond()'s cache_control comment)."""
     facts = memory.all_facts()[-60:]  # cap: facts accumulate for years; keep prompt bounded
-    facts_txt = "\n".join(f"- [f{f['id']}] {f['content']}" for f in facts) or "(nothing yet — she's new; learn her name early)"
+    facts_txt = "\n".join(f"- [f{f['id']}] {f['content']}" for f in facts) or f"(nothing yet — {_S}'s new; learn {_P} name early)"
     items = memory.open_items()[:40]
     if items:
         lines = []
@@ -511,9 +520,9 @@ def _state_block() -> str:
     )
     return (
         f"\n--- CURRENT STATE ---\n"
-        f"What you know about her:\n{facts_txt}\n\n"
-        f"Her open items:\n{items_txt}\n\n"
-        f"Her calendar (next 7 days):\n{cal_txt}\n\n"
+        f"What you know about {_O}:\n{facts_txt}\n\n"
+        f"{_Pcap} open items:\n{items_txt}\n\n"
+        f"{_Pcap} calendar (next 7 days):\n{cal_txt}\n\n"
         f"Your current behavior settings: {prefs_txt}\n"
     )
 
@@ -687,18 +696,18 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:600])
         messages.append({"role": "assistant", "content": resp.content})
         messages.append({"role": "user", "content": [{"type": "text", "text": (
-            "(automated system check, not a message from her — she has not seen your "
+            f"(automated system check, not a message from {_O} — {_S} has not seen your "
             "last reply yet and did not correct you: your last reply reads like it's "
-            "claiming a change happened, but no tool call succeeded this turn. Look at "
-            "what she actually asked. Three honest outcomes are possible, pick whichever "
+            f"claiming a change happened, but no tool call succeeded this turn. Look at "
+            f"what {_S} actually asked. Three honest outcomes are possible, pick whichever "
             "is true: (1) something genuinely needs doing — make the real tool call(s) "
             "now and confirm; (2) you can't do it — say so plainly; (3) nothing actually "
-            "needed fixing — she asked a question, not for a change, and your wording "
+            f"needed fixing — {_S} asked a question, not for a change, and your wording "
             "just sounded like a claim. In case (3), do NOT invent a tool call to have "
-            "something to point to — just answer her question accurately with no action "
+            f"something to point to — just answer {_P} question accurately with no action "
             "at all. Whichever it is, do not say 'you're right', don't reference this "
-            "check, don't apologize for a mistake she hasn't actually raised — reply as "
-            "your first and only response to her.)"
+            f"check, don't apologize for a mistake {_S} hasn't actually raised — reply as "
+            f"your first and only response to {_O}.)"
         )}]})
         resp = _create(messages)
         _execute_tool_calls(resp.content)
@@ -730,13 +739,13 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             log.warning("capture check found %d possibly-missed item(s): %r", len(missed), missed)
             messages.append({"role": "assistant", "content": resp.content})
             messages.append({"role": "user", "content": [{"type": "text", "text": (
-                "(automated system check, not a message from her — she has not seen your "
-                "reply yet: her message may have contained items you did not capture: "
-                + "; ".join(missed[:5]) + ". If any of these are genuinely distinct new items "
-                "she asked to save, capture them now and confirm everything in one reply. If "
+                f"(automated system check, not a message from {_O} — {_S} has not seen your "
+                f"reply yet: {_P} message may have contained items you did not capture: "
+                + "; ".join(missed[:5]) + f". If any of these are genuinely distinct new items "
+                f"{_S} asked to save, capture them now and confirm everything in one reply. If "
                 "they are duplicates of items you already saved or not actually asks, change "
                 "nothing and simply restate your confirmation. Reply as your first and only "
-                "response to her — do not mention this check.)"
+                f"response to {_O} — do not mention this check.)"
             )}]})
             resp = _create(messages)
             _execute_tool_calls(resp.content)
@@ -853,7 +862,7 @@ Write the owner's morning digest for {today}. Rules:
 - Using ONLY the "Due today" list above, order those items into a realistic sequence given their times (see the state below for exact times); name the ONE thing that matters most first.
 - Then a "Heads up:" section ONLY if you find real problems in the next 3 days using the state below: time conflicts, an item missing obvious prep (a gift not bought before its wrapping day), or something due on a day off. Skip the section entirely if there are none — never invent a concern.
 - If the spare-energy list above is non-empty, offer those exact items as "if there's spare energy" — nothing else belongs in that section, and nothing from it belongs in "due today" or vice versa.
-- Plain text, no markdown headers/bold, max 12 short lines, warm but not chatty. Do not greet with her name. Never claim anything was changed or handled — this is a read-only summary.
+- Plain text, no markdown headers/bold, max 12 short lines, warm but not chatty. Do not greet by name. Never claim anything was changed or handled — this is a read-only summary.
 - End with exactly this line: ({n_open} things safely on the list — say "list" anytime.)"""
 
 

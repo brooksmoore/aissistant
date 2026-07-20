@@ -11,7 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 import memory
-from config import CLASSIFIER_MODEL, HARD_CAP_USD, DB_PATH, INSTANCE_DIR, LOG_PATH, TZ
+from config import CLASSIFIER_MODEL, HARD_CAP_USD, DB_PATH, INSTANCE, INSTANCE_DIR, LOG_PATH, TZ
 from scheduler import icon, pref
 
 log = logging.getLogger("penny.maintenance")
@@ -26,13 +26,20 @@ WEEKLY_HOUR = 17     # 5pm local, same window as her evening wind-down
 # ---------- daily backup ----------
 
 def backup_db():
-    """Copies penny.db into backups/ once a day via SQLite's own backup API
-    (safe to run against a live, in-use database), and prunes old copies."""
+    """Copies this instance's db into backups/ once a day via SQLite's own backup
+    API (safe to run against a live, in-use database), and prunes old copies.
+
+    Filename prefix is the actual instance name (INSTANCE), not a hardcoded
+    "penny_" — that hardcoding predates Jarvis existing as a second instance and
+    meant Jarvis's own backups were being written under jarvis/backups/ but named
+    penny_<date>.db. Not a real cross-instance data leak (each instance's backups
+    stay in its own INSTANCE_DIR the whole time — see config.py), just a
+    confusing label. Fixed 2026-07-20; see STATUS.md."""
     today = datetime.now(TZ).date().isoformat()
     if memory.get_setting("last_backup_date") == today:
         return
     BACKUP_DIR.mkdir(exist_ok=True)
-    dest = BACKUP_DIR / f"penny_{today}.db"
+    dest = BACKUP_DIR / f"{INSTANCE}_{today}.db"
     try:
         src = sqlite3.connect(str(DB_PATH))
         dst = sqlite3.connect(str(dest))
@@ -46,9 +53,10 @@ def backup_db():
     memory.set_setting("last_backup_date", today)
     prune()
     cutoff = datetime.now(TZ) - timedelta(days=BACKUP_KEEP_DAYS)
-    for f in glob.glob(str(BACKUP_DIR / "penny_*.db")):
+    prefix = f"{INSTANCE}_"
+    for f in glob.glob(str(BACKUP_DIR / f"{prefix}*.db")):
         try:
-            stamp = os.path.basename(f)[len("penny_"):-len(".db")]
+            stamp = os.path.basename(f)[len(prefix):-len(".db")]
             if datetime.fromisoformat(stamp).replace(tzinfo=TZ) < cutoff:
                 os.remove(f)
         except Exception:
@@ -83,8 +91,8 @@ async def backup_tick(context):
 
 # ---------- weekly fact tidy-up ----------
 
-FACT_TIDY_PROMPT = """Below is one person's stored memory facts, used to personalize an anxiety-support \
-personal assistant. Clean this list:
+FACT_TIDY_PROMPT = """Below is one person's stored memory facts, used to personalize a personal assistant. \
+Clean this list:
 - Merge duplicates or near-duplicates into a single fact.
 - Drop facts that are purely one-time and now clearly in the past (a specific past date/event that already \
 happened), UNLESS they describe a recurring pattern worth keeping (e.g. "usually sees X on Fridays").
