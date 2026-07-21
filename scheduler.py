@@ -150,8 +150,21 @@ def render_list(items) -> str:
             else:
                 due = f" — due {d.strftime('%a %-m/%-d %-I:%M%p').replace(':00PM','PM').replace(':00AM','AM')}"
         repeat = " 🔁" if it["recurrence"] else ""
-        lines.append(f"{idx}. {flame.get(it['priority'], '🟡')} {it['title']}{due}{repeat}")
+        progress = f" — {it['progress_current'] or 0}/{it['progress_target']}" if it["progress_target"] is not None else ""
+        lines.append(f"{idx}. {flame.get(it['priority'], '🟡')} {it['title']}{progress}{due}{repeat}")
     return "\n".join(lines)
+
+
+def _fill_progress(text: str, it) -> str:
+    """Substitutes {current}/{target} placeholders in a custom reminder_text
+    against the item's live progress_current/progress_target columns — the
+    text itself is a stable template set once at creation, never rewritten
+    per update, so it can never drift out of sync with the real count the
+    way two independently hand-edited strings did."""
+    if it["progress_target"] is None:
+        return text
+    return (text.replace("{current}", str(it["progress_current"] or 0))
+                .replace("{target}", str(it["progress_target"])))
 
 
 def _reminder_text(entry: dict, show_overdue: bool) -> str:
@@ -160,12 +173,16 @@ def _reminder_text(entry: dict, show_overdue: bool) -> str:
     it's her wording for every future ping on this item, not just one."""
     it = entry["item"]
     if it["reminder_text"]:
-        return it["reminder_text"]
+        return _fill_progress(it["reminder_text"], it)
+    if it["progress_target"] is not None:
+        progress = f" — {it['progress_current'] or 0}/{it['progress_target']}"
+    else:
+        progress = ""
     if entry["kind"] == "scheduled":
-        return f"{icon('⏰')}Reminder: {it['title']}"
+        return f"{icon('⏰')}Reminder: {it['title']}{progress}"
     when = f" ({icon('⚠️')}overdue)" if show_overdue else ""
     prefix = f"{icon('⏰')}Nudge #{it['remind_count'] + 1}"
-    return f"{prefix}: {it['title']}{when}"
+    return f"{prefix}: {it['title']}{progress}{when}"
 
 
 async def check_reminders(context):

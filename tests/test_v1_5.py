@@ -128,6 +128,146 @@ class TestMultiReminderParsing(unittest.TestCase):
         self.assertEqual(len(memory.open_items()), 1)
 
 
+class TestProgressTracking(unittest.TestCase):
+    """Replaces the old approach (freely rewriting title/reminder_text strings
+    like "25/100 pushups done today" by hand) after four separate live
+    incidents in one week: title and reminder_text updated out of sync with
+    each other; a recurring respawn copying the previous day's count forward
+    instead of starting fresh; and, worst, the model completing the item on a
+    guess when the owner explicitly said they hadn't done any yet, discarding
+    real progress. A single numeric column, written by exactly one function,
+    removes the entire class of bug — see memory.log_progress's docstring."""
+
+    def setUp(self):
+        fresh_db()
+
+    def test_new_item_starts_at_zero(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        item = memory.get_item(i)
+        self.assertEqual(item["progress_current"], 0)
+        self.assertEqual(item["progress_target"], 100)
+
+    def test_ordinary_item_has_no_progress_fields(self):
+        i = memory.add_item("Renew registration")
+        item = memory.get_item(i)
+        self.assertIsNone(item["progress_current"])
+        self.assertIsNone(item["progress_target"])
+
+    def test_delta_adds_to_current(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.log_progress(i, delta=25)
+        new_current, done = memory.log_progress(i, delta=25)
+        self.assertEqual(new_current, 50)
+        self.assertFalse(done)
+        self.assertEqual(memory.get_item(i)["progress_current"], 50)
+
+    def test_set_to_replaces_current_outright(self):
+        """Corrects a miscount without needing to know the current value."""
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.log_progress(i, delta=50)
+        memory.log_progress(i, set_to=25)
+        self.assertEqual(memory.get_item(i)["progress_current"], 25)
+
+    def test_delta_and_set_to_together_is_rejected(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        with self.assertRaises(ValueError):
+            memory.log_progress(i, delta=10, set_to=10)
+
+    def test_neither_delta_nor_set_to_is_rejected(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        with self.assertRaises(ValueError):
+            memory.log_progress(i)
+
+    def test_clamped_to_target_not_allowed_to_overshoot(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        new_current, done = memory.log_progress(i, delta=500)
+        self.assertEqual(new_current, 100)
+        self.assertTrue(done)
+
+    def test_clamped_to_zero_not_allowed_negative(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.log_progress(i, delta=10)
+        new_current, _ = memory.log_progress(i, delta=-999)
+        self.assertEqual(new_current, 0)
+
+    def test_non_progress_item_rejects_log_progress(self):
+        i = memory.add_item("Renew registration")
+        with self.assertRaises(ValueError):
+            memory.log_progress(i, delta=1)
+
+    def test_reaching_target_completes_the_item(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        _, done = memory.log_progress(i, set_to=100)
+        self.assertTrue(done)
+        self.assertEqual(memory.get_item(i)["status"], "done")
+
+    def test_reaching_target_on_a_recurring_item_respawns_at_zero(self):
+        """The exact bug this replaces: the old design copied the previous
+        day's count forward into the new occurrence. The new one must not."""
+        i = memory.add_item("Pushups", due_at="2026-07-21T23:59:00", recurrence="daily",
+                             progress_target=100)
+        memory.log_progress(i, set_to=100)
+        nxt = memory.open_items()[0]
+        self.assertEqual(nxt["progress_current"], 0)      # fresh day, not carried forward
+        self.assertEqual(nxt["progress_target"], 100)     # same goal, carried forward
+        self.assertNotEqual(nxt["id"], i)
+
+    def test_update_item_cannot_touch_progress_current(self):
+        """progress_current only ever moves through log_progress — update_item
+        silently ignores it rather than accepting a hand-edited number."""
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.update_item(i, progress_current=99)
+        self.assertEqual(memory.get_item(i)["progress_current"], 0)
+
+    def test_update_item_can_change_the_target_itself(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.update_item(i, progress_target=150)
+        self.assertEqual(memory.get_item(i)["progress_target"], 150)
+
+    def test_completing_short_of_target_does_not_auto_reach_it(self):
+        """Skipping/abandoning today's goal early (complete_item, not
+        log_progress) must not silently claim the target was hit."""
+        i = memory.add_item("Pushups", due_at="2026-07-21T23:59:00", recurrence="daily",
+                             progress_target=100)
+        memory.log_progress(i, delta=25)
+        memory.complete_item(i)
+        self.assertEqual(memory.get_item(i)["status"], "done")
+        nxt = memory.open_items()[0]
+        self.assertEqual(nxt["progress_current"], 0)
+
+
+class TestReminderTextProgressTemplate(unittest.TestCase):
+    def setUp(self):
+        fresh_db()
+        import scheduler
+        self.scheduler = scheduler
+
+    def test_placeholder_substitution_in_custom_reminder_text(self):
+        i = memory.add_item("Pushups", reminder_text="Pushups today: {current}/{target}",
+                             progress_target=100)
+        memory.log_progress(i, delta=25)
+        item = memory.get_item(i)
+        entry = {"item": item, "kind": "nag"}
+        text = self.scheduler._reminder_text(entry, show_overdue=False)
+        self.assertIn("25/100", text)
+        self.assertNotIn("{current}", text)
+        self.assertNotIn("{target}", text)
+
+    def test_default_reminder_text_shows_progress_when_no_template_set(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.log_progress(i, delta=40)
+        item = memory.get_item(i)
+        entry = {"item": item, "kind": "scheduled"}
+        text = self.scheduler._reminder_text(entry, show_overdue=False)
+        self.assertIn("40/100", text)
+
+    def test_render_list_shows_live_progress(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        memory.log_progress(i, delta=60)
+        text = self.scheduler.render_list(memory.open_items())
+        self.assertIn("60/100", text)
+
+
 class TestBundlingAndPingBudget(unittest.TestCase):
     def setUp(self):
         fresh_db()

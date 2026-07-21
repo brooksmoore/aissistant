@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS items (
     recurrence TEXT,
     remind_lead_seconds INTEGER,
     recurrence_until TEXT,
-    reminder_text TEXT
+    reminder_text TEXT,
+    progress_current INTEGER,
+    progress_target INTEGER
 );
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,6 +82,10 @@ def init():
             con.execute("ALTER TABLE items ADD COLUMN recurrence_until TEXT")
         if "reminder_text" not in cols:
             con.execute("ALTER TABLE items ADD COLUMN reminder_text TEXT")
+        if "progress_current" not in cols:
+            con.execute("ALTER TABLE items ADD COLUMN progress_current INTEGER")
+        if "progress_target" not in cols:
+            con.execute("ALTER TABLE items ADD COLUMN progress_target INTEGER")
     _migrate_reminders_table()
 
 
@@ -130,10 +136,16 @@ RECURRENCE_UNITS = ("daily", "weekly", "monthly", "yearly")
 
 
 def add_item(title, details="", category="task", priority=3, due_at=None, remind_at=None,
-             recurrence=None, recurrence_until=None, reminder_text=None, _con=None) -> int:
+             recurrence=None, recurrence_until=None, reminder_text=None, progress_target=None,
+             _con=None) -> int:
     """remind_at is one ISO datetime, or several separated by ' | ' (e.g. night-before
     + day-of). Each becomes a one-shot row in `reminders` — a scheduled ping fires once
     and does not itself start a nag chain (see due_nags / due_scheduled_reminders).
+
+    progress_target: set this to make the item a numeric daily-goal tracker (pushup
+    counts, etc.) — progress_current always starts at 0, regardless of how far along
+    a previous occurrence got. Progress is only ever changed via log_progress(), never
+    by rewriting title/reminder_text — see log_progress()'s docstring for why.
 
     _con: an existing open connection to write on instead of opening a new one —
     lets a caller (complete_item's recurrence respawn) fold this insert into its
@@ -154,14 +166,15 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
         d, r = parse_dt(due_at), parse_dt(min(remind_times))
         if d and r:
             lead = max(0, int((d - r).total_seconds()))
+    progress_current = 0 if progress_target is not None else None
 
     def _insert(con):
         cur = con.execute(
             "INSERT INTO items (title, details, category, priority, due_at, created_at, recurrence,"
-            " remind_lead_seconds, recurrence_until, reminder_text)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " remind_lead_seconds, recurrence_until, reminder_text, progress_current, progress_target)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (title, details, category, int(priority), due_at, now_iso(), recurrence,
-             lead, recurrence_until, reminder_text),
+             lead, recurrence_until, reminder_text, progress_current, progress_target),
         )
         item_id = cur.lastrowid
         for t in remind_times:
@@ -199,8 +212,13 @@ def get_item(item_id) -> Optional[sqlite3.Row]:
 
 
 def update_item(item_id, **fields):
+    # progress_current is deliberately NOT allowed here — it only ever moves
+    # through log_progress(), which is the one place that keeps it consistent
+    # with completion/respawn. progress_target (the goal itself, e.g. raising
+    # a daily pushup target from 100 to 150) is a legitimate one-time config
+    # change and stays allowed.
     allowed = {"title", "details", "category", "priority", "due_at", "status", "next_remind_at",
-               "remind_count", "recurrence", "recurrence_until", "reminder_text"}
+               "remind_count", "recurrence", "recurrence_until", "reminder_text", "progress_target"}
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
         return
@@ -253,8 +271,49 @@ def complete_item(item_id):
                 recurrence=item["recurrence"],
                 recurrence_until=item["recurrence_until"] if "recurrence_until" in item.keys() else None,
                 reminder_text=item["reminder_text"] if "reminder_text" in item.keys() else None,
+                # same daily target carries forward; progress_current always
+                # restarts at 0 in add_item regardless of where the old item
+                # left off — a new day is a clean slate, never a carried count
+                progress_target=item["progress_target"] if "progress_target" in item.keys() else None,
                 _con=con,
             )
+
+
+def log_progress(item_id, delta=None, set_to=None) -> tuple:
+    """The ONE place a numeric daily-goal item's count changes. Replaces the
+    earlier design (freely rewriting title/reminder_text strings like "25/100
+    pushups done today" by hand) after four separate live incidents in one
+    week: the model updating title but not reminder_text (or vice versa) and
+    leaving them showing different numbers; a recurring respawn copying the
+    previous day's count forward verbatim instead of starting fresh; and,
+    worst, the model calling complete_item on a guess when it meant to log a
+    number, silently discarding real progress. A single numeric column with
+    exactly one function that writes it removes the entire class: there is no
+    second field to fall out of sync with, and completion only ever happens
+    here, atomically, when the number actually reaches target — never as a
+    side effect of the model narrating progress in English.
+
+    Exactly one of delta (add to the current count) or set_to (replace it
+    outright — for correcting an earlier miscount) must be given. Clamped to
+    [0, target]. Returns (new_current, target_reached: bool); if the target
+    was reached, the item is completed (and, if recurring, respawned at 0)
+    in the same call — the caller never needs a separate complete_item."""
+    if (delta is None) == (set_to is None):
+        raise ValueError("log_progress needs exactly one of delta or set_to")
+    item = get_item(item_id)
+    if not item or item["status"] != "open":
+        raise ValueError("that item isn't open")
+    if item["progress_target"] is None:
+        raise ValueError("that item isn't a numeric progress tracker")
+    current = item["progress_current"] or 0
+    new_current = current + delta if delta is not None else set_to
+    new_current = max(0, min(new_current, item["progress_target"]))
+    with _c() as con:
+        con.execute("UPDATE items SET progress_current=? WHERE id=?", (new_current, item_id))
+    target_reached = new_current >= item["progress_target"]
+    if target_reached:
+        complete_item(item_id)
+    return new_current, target_reached
 
 
 def open_items() -> list:

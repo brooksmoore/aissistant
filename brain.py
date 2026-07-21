@@ -138,6 +138,15 @@ what happens to the item ("Have fun — I'll leave 'Go to Watchfest' on your lis
 tell me"). A reply that doesn't mention the tracked item at all leaves {_O} unable to tell whether it's still being \
 watched.
 
+NUMERIC GOALS: An item with a progress_target (a pushup count, etc.) tracks a real number in progress_current — \
+read it from the state below, never from an old reply or reminder_text. log_progress is the ONLY tool that ever \
+changes that number; complete_item/update_item must never be used to record a count (four real incidents came \
+from exactly that — hand-editing title/reminder_text strings to represent a count, which silently drifted, or \
+worse, got fabricated as "checked off" when {_S} explicitly said {_S} hadn't done any yet). If {_S} is skipping or \
+stopping today's goal early for a real reason (a stored routine, or {_S} just says stop), complete_item is fine, \
+but say what actually happened — the real last-logged count and that it was skipped/stopped — never claim the \
+target number was reached when it wasn't.
+
 SPEAK: 1-3 short, complete, natural sentences ("I'll remind you tonight at 7:30" — never "pinged tonight", \
 never a bare "Done."). Every confirmation names what changed. Obey the emoji_level and reply_length preferences; \
 at most one emoji regardless. No headers, no sign-offs, no restating {_P} list unprompted.
@@ -219,7 +228,11 @@ def _tools() -> list:
                     },
                     "reminder_text": {
                         "type": "string",
-                        "description": f"{_Pcap} exact custom wording for every future ping on this item, verbatim, instead of the default 'Reminder: {{title}}' — e.g. {_S} wants pushup pings to say '0/100 done today'.",
+                        "description": f"{_Pcap} exact custom wording for every future ping on this item, verbatim, instead of the default 'Reminder: {{title}}' — e.g. {_S} wants pushup pings to say 'Pushups today: {{current}}/{{target}}'. The literal placeholders {{current}}/{{target}} are filled in live from progress_target below, if set — never write an actual number in here for a progress-tracked item, it will go stale.",
+                    },
+                    "progress_target": {
+                        "type": "integer",
+                        "description": f"Set ONLY for a numeric daily goal {_S} wants counted up over the day (pushups, glasses of water, pages read). Turns this into a progress tracker: starts at 0, and every future update to the count goes through log_progress — never capture the count itself in the title or a number in reminder_text. Omit entirely for an ordinary item.",
                     },
                 },
                 "required": ["title", "category", "priority"],
@@ -227,10 +240,23 @@ def _tools() -> list:
         },
         {
             "name": "complete_item",
-            "description": f"Mark an item done ({_S} says {_S} did it, or it's clearly no longer needed).",
+            "description": f"Mark an item done ({_S} says {_S} did it, or it's clearly no longer needed). For a progress-tracked item (has a progress_target), only call this to end today's goal EARLY/short of target (skipped, abandoned) — reaching the target through log_progress already completes it for you. If you do complete one short of target, your confirmation must state the real last-logged count, never the target number.",
             "input_schema": {
                 "type": "object",
                 "properties": {"item_id": {"type": "integer"}},
+                "required": ["item_id"],
+            },
+        },
+        {
+            "name": "log_progress",
+            "description": f"The ONLY way to update a numeric daily-goal item's count (one with progress_target set) — a pushup count, etc. NEVER use complete_item or update_item to record a number; four separate live bugs came from hand-editing title/reminder_text strings to represent a count, which drifted out of sync with each other or got wiped by the next day's respawn. Give delta to ADD to the current count (e.g. {_S} says 'did 25 more' -> delta=25), or set_to to replace it outright (correcting a miscount 'actually only 25, not 50' -> set_to=25) — never both. Reaching progress_target auto-completes the item for you (and respawns tomorrow's occurrence at zero, if it repeats) — you don't call complete_item yourself when the goal is hit.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "delta": {"type": "integer", "description": "Add this many to the current count."},
+                    "set_to": {"type": "integer", "description": "Replace the count with exactly this value."},
+                },
                 "required": ["item_id"],
             },
         },
@@ -262,7 +288,11 @@ def _tools() -> list:
                     },
                     "reminder_text": {
                         "type": "string",
-                        "description": f"{_Pcap} exact custom wording for every future ping on this item, verbatim, instead of the default template.",
+                        "description": f"{_Pcap} exact custom wording for every future ping on this item, verbatim, instead of the default template. Use the literal placeholders {{current}}/{{target}} for a progress-tracked item, never a real number.",
+                    },
+                    "progress_target": {
+                        "type": "integer",
+                        "description": "Changes the GOAL only (e.g. raising a daily pushup target from 100 to 150) — never the current count, which only ever moves through log_progress.",
                     },
                 },
                 "required": ["item_id"],
@@ -387,11 +417,27 @@ def _run_tool(name: str, inp: dict) -> ToolResult:
                 recurrence=inp.get("recurrence"),
                 recurrence_until=inp.get("recurrence_until"),
                 reminder_text=inp.get("reminder_text"),
+                progress_target=inp.get("progress_target"),
             )
             return ToolResult(True, f"Saved as item #{item_id}.")
         if name == "complete_item":
             memory.complete_item(inp["item_id"])
             return ToolResult(True, "Marked done.")
+        if name == "log_progress":
+            # The only path that ever changes progress_current — see
+            # memory.log_progress's docstring for why title/reminder_text are
+            # never hand-edited to represent a count anymore (four separate
+            # live incidents in one week under the old approach).
+            try:
+                new_current, done = memory.log_progress(
+                    inp["item_id"], delta=inp.get("delta"), set_to=inp.get("set_to"),
+                )
+            except ValueError as e:
+                return ToolResult(False, str(e))
+            msg = f"Logged. Now at {new_current}."
+            if done:
+                msg += " Target reached — marked complete."
+            return ToolResult(True, msg)
         if name == "update_item":
             fields = {k: v for k, v in inp.items() if k != "item_id"}
             remind_at = fields.pop("remind_at", None)
@@ -399,20 +445,6 @@ def _run_tool(name: str, inp: dict) -> ToolResult:
                 fields["recurrence"] = None
             if fields.get("recurrence_until") == "":
                 fields["recurrence_until"] = None
-            if "title" in fields and "reminder_text" not in fields:
-                # Items with a custom reminder_text (the "N/100 done today"
-                # progress-tracking pattern) keep title and reminder_text
-                # mirrored by convention — the scheduler shows reminder_text
-                # over title at ping time, so a title-only update silently
-                # freezes the actual reminder wording. Real incident
-                # (2026-07-19, jarvis): "Did 25 pushups" updated the title to
-                # "25/100..." but left reminder_text at "0/100...", so the
-                # next reminder still showed the stale count. Code-level
-                # guard, not a prompt instruction — the same divergence has
-                # now happened twice despite prompt wording alone.
-                current = memory.get_item(inp["item_id"])
-                if current and current["reminder_text"]:
-                    fields["reminder_text"] = fields["title"]
             if fields:
                 memory.update_item(inp["item_id"], **fields)
             if remind_at is not None:
@@ -493,8 +525,12 @@ def _state_block() -> str:
             if i["recurrence"]:
                 until = f" until {i['recurrence_until']}" if i["recurrence_until"] else ""
                 bits.append(f"repeats {i['recurrence']}{until}")
+            if i["progress_target"] is not None:
+                # authoritative — always read this, never the reminder_text
+                # template below, for "how many has {_S} done" type questions
+                bits.append(f"progress {i['progress_current'] or 0}/{i['progress_target']} (log_progress, not complete_item/update_item, to change this)")
             if i["reminder_text"]:
-                bits.append(f"custom ping text: \"{i['reminder_text']}\"")
+                bits.append(f"custom ping text template: \"{i['reminder_text']}\"")
             if i["details"]:
                 bits.append(f"— {i['details'][:120]}")
             lines.append(" ".join(bits))
@@ -621,7 +657,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
                 continue
             # grab the title before complete_item wipes our chance to name it
             pre_title = None
-            if block.name in ("complete_item", "update_item"):
+            if block.name in ("complete_item", "update_item", "log_progress"):
                 row = memory.get_item(block.input.get("item_id", -1))
                 pre_title = row["title"] if row else None
             result = _run_tool(block.name, block.input)
@@ -632,6 +668,8 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
                 did.append(f"checked off \"{pre_title}\"")
             elif ok and block.name == "update_item" and pre_title:
                 did.append(f"updated \"{pre_title}\"")
+            elif ok and block.name == "log_progress" and pre_title:
+                did.append(f"logged progress on \"{pre_title}\" ({result.message})")
             elif ok and block.name == "set_preference":
                 did.append(f"changed {block.input.get('key','a setting')}")
             elif ok and block.name == "remember_fact":

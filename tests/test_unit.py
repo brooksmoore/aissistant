@@ -364,38 +364,38 @@ class TestMalleability(unittest.TestCase):
         contents = [f["content"] for f in memory.all_facts()]
         self.assertEqual(contents, ["Her birthday is July 17"])
 
-    def test_title_only_update_mirrors_into_reminder_text_when_one_is_set(self):
-        """Real incident (2026-07-19, jarvis): 'Did 25 pushups' updated the
-        item's title to '25/100 pushups done today' but left reminder_text
-        at the stale '0/100...' — the scheduler shows reminder_text over
-        title at ping time, so the next reminder still showed 0/100 despite
-        the title being correct. Items using this custom-wording pattern keep
-        title and reminder_text mirrored; a title-only update must not be
-        allowed to desync them."""
-        i = memory.add_item("0/100 pushups done today", reminder_text="0/100 pushups done today")
-        self.brain._run_tool("update_item", {"item_id": i, "title": "25/100 pushups done today"})
-        item = memory.get_item(i)
-        self.assertEqual(item["title"], "25/100 pushups done today")
-        self.assertEqual(item["reminder_text"], "25/100 pushups done today")
+    def test_log_progress_tool_adds_delta(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        r = self.brain._run_tool("log_progress", {"item_id": i, "delta": 25})
+        self.assertTrue(r.ok)
+        self.assertEqual(memory.get_item(i)["progress_current"], 25)
 
-    def test_title_only_update_leaves_reminder_text_alone_when_it_was_never_set(self):
-        """An ordinary item with no custom reminder_text must not have one
-        invented just because its title changed."""
+    def test_log_progress_tool_set_to_corrects_a_miscount(self):
+        i = memory.add_item("Pushups", progress_target=100)
+        self.brain._run_tool("log_progress", {"item_id": i, "delta": 50})
+        self.brain._run_tool("log_progress", {"item_id": i, "set_to": 25})
+        self.assertEqual(memory.get_item(i)["progress_current"], 25)
+
+    def test_log_progress_tool_rejects_non_progress_item(self):
+        """Real incident class (2026-07-18/19/21, jarvis): four separate bugs
+        came from treating an ordinary item's title/reminder_text as if it
+        were a counter. The new tool refuses outright on an item that was
+        never set up as one, instead of silently doing something wrong."""
         i = memory.add_item("Renew registration")
-        self.brain._run_tool("update_item", {"item_id": i, "title": "Renew car registration"})
-        item = memory.get_item(i)
-        self.assertEqual(item["title"], "Renew car registration")
-        self.assertIsNone(item["reminder_text"])
+        r = self.brain._run_tool("log_progress", {"item_id": i, "delta": 25})
+        self.assertFalse(r.ok)
 
-    def test_explicit_reminder_text_update_is_never_overridden(self):
-        """When both are given explicitly, the caller's reminder_text wins —
-        the mirroring only fills in a gap, never overrides an explicit value."""
-        i = memory.add_item("0/100 pushups done today", reminder_text="0/100 pushups done today")
-        self.brain._run_tool("update_item", {
-            "item_id": i, "title": "25/100 pushups done today",
-            "reminder_text": "custom wording, do not touch",
-        })
-        self.assertEqual(memory.get_item(i)["reminder_text"], "custom wording, do not touch")
+    def test_log_progress_reaching_target_completes_and_does_not_leak_into_update_item(self):
+        """update_item must never be able to touch progress_current directly —
+        only log_progress does, and only log_progress can complete the item
+        via reaching the target."""
+        i = memory.add_item("Pushups", progress_target=100)
+        self.brain._run_tool("update_item", {"item_id": i, "progress_current": 99})
+        self.assertEqual(memory.get_item(i)["progress_current"], 0)  # ignored — not an allowed field
+        r = self.brain._run_tool("log_progress", {"item_id": i, "set_to": 100})
+        self.assertTrue(r.ok)
+        self.assertIn("complete", r.message.lower())
+        self.assertEqual(memory.get_item(i)["status"], "done")
 
 
 class TestCostControls(unittest.TestCase):
