@@ -136,6 +136,29 @@ class TestRecurrenceTiming(unittest.TestCase):
         memory.complete_item(i)  # second tap
         self.assertEqual(len(memory.open_items()), 1)
 
+    def test_late_completion_never_respawns_a_past_reminder(self):
+        """Live incident (2026-07-23, jarvis): a daily pushup item due 11:59pm
+        got completed the NEXT day at noon (a day late). Advancing its stale
+        due_at by one cycle landed on that same day's 11:59pm — still valid —
+        but the reminder (due minus an ~16h lead) landed that same morning,
+        already hours in the past. The scheduler treated the fresh respawn as
+        instantly overdue and re-nagged within the minute. The respawned
+        reminder must always be genuinely in the future, no matter how late
+        the completion was."""
+        now = datetime.now(config.TZ)
+        yesterday_due = (now - timedelta(days=1)).replace(hour=23, minute=59, second=0, microsecond=0)
+        i = memory.add_item(
+            "Pushups", due_at=yesterday_due.isoformat(timespec="seconds"),
+            remind_at=(yesterday_due - timedelta(hours=16)).isoformat(timespec="seconds"),
+            recurrence="daily", progress_target=100,
+        )
+        memory.complete_item(i)  # completed a day late, well past the original due_at
+        nxt = memory.open_items()[0]
+        remind_times = memory.pending_reminder_times(nxt["id"])
+        self.assertEqual(len(remind_times), 1)
+        remind = memory.parse_dt(remind_times[0])
+        self.assertGreater(remind, now)
+
 
 class TestReminderTiming(unittest.TestCase):
     """The nag engine: escalation, quiet hours, due detection."""

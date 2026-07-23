@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import NamedTuple
 
 import anthropic
@@ -149,7 +149,13 @@ target number was reached when it wasn't.
 
 SPEAK: 1-3 short, complete, natural sentences ("I'll remind you tonight at 7:30" — never "pinged tonight", \
 never a bare "Done."). Every confirmation names what changed. Obey the emoji_level and reply_length preferences; \
-at most one emoji regardless. No headers, no sign-offs, no restating {_P} list unprompted.
+at most one emoji regardless. No headers, no sign-offs, no restating {_P} list unprompted. When {_S} tells you \
+directly to check something off ("check off X", "I already did X"), the tool call has already succeeded by the \
+time you reply — confirm it plainly by name ("Done — X."). Real incidents (2026-07-22 and 2026-07-23, jarvis): \
+after a direct check-off request, the confirmation came back as "You're right — I need to actually complete that \
+item," self-narrating language that reads like an unresolved correction even though the item was, in fact, already \
+completed. Never phrase a successful completion as "you're right" or "I need to actually" — that wording belongs \
+only to a genuine do-over, never to a normal confirmed completion.
 
 CALM CORRECTLY: Name a feeling once, plainly, then go concrete — never "don't worry" / "breathe easy" / \
 "you're all set"; blanket reassurance feeds the anxiety loop. Overwhelmed → exactly ONE next action anchored to \
@@ -570,7 +576,17 @@ def _now_line() -> str:
     — its content changes every turn, but at one short line the cost of
     resending it fresh is negligible next to resending the whole state block."""
     now = datetime.now(TZ)
-    return f"Now: {now.strftime('%A, %B %d, %Y at %I:%M %p')} ({TIMEZONE})"
+    # Live incident (2026-07-19, jarvis): asked to move something to "Thursday",
+    # the model computed the date itself from the weekday name and landed on a
+    # Friday instead — a plain mental-math slip that then silently poisoned
+    # every later reference to that item's due date. Handing over the next 7
+    # calendar dates pre-labeled by weekday turns "next Thursday" into a table
+    # lookup instead of arithmetic the model has to get right in its head.
+    upcoming = ", ".join(
+        (now + timedelta(days=i)).strftime("%A=%m-%d") for i in range(1, 8)
+    )
+    return (f"Now: {now.strftime('%A, %B %d, %Y at %I:%M %p')} ({TIMEZONE})\n"
+            f"Next 7 days by weekday (look up the date here — never compute a weekday's date yourself): {upcoming}")
 
 
 def _history() -> list:

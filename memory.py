@@ -261,6 +261,21 @@ def complete_item(item_id):
             if until and new_due.date() > until.date():
                 return  # series has ended — don't spawn past the requested end date
             new_remind = new_due - timedelta(seconds=lead)
+            # Completing a recurring item late (its own due_at already in the
+            # past) used to respawn a reminder that landed in the past too —
+            # e.g. a daily item due 11:59pm completed the next day at noon
+            # advances to today 11:59pm, minus a same-morning lead, which is
+            # already behind "now". The scheduler then treats that as an
+            # already-overdue nag and fires within the minute — a pushup item
+            # marked done immediately re-nagged from 0/100 (live incident,
+            # 2026-07-23). Keep rolling forward whole cycles until the new
+            # reminder is genuinely in the future.
+            now = datetime.now(TZ)
+            while new_remind <= now:
+                new_due = _advance_date(new_due, item["recurrence"])
+                new_remind = new_due - timedelta(seconds=lead)
+                if until and new_due.date() > until.date():
+                    return
             add_item(
                 title=item["title"],
                 details=item["details"],
