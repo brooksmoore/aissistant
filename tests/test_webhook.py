@@ -71,6 +71,18 @@ class TestWebhookCapture(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    def _get(self, path, secret="__use_default__"):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {}
+        if secret != "__omit__":
+            headers["X-Aissistant-Secret"] = self.SECRET if secret == "__use_default__" else secret
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            resp = urllib.request.urlopen(req)
+            return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
     def test_valid_request_returns_reply_from_brain(self):
         status, payload = self._post({"text": "remind me to call mom"})
         self.assertEqual(status, 200)
@@ -96,6 +108,25 @@ class TestWebhookCapture(unittest.TestCase):
 
     def test_unknown_path_is_404(self):
         status, payload = self._post({"text": "hi"}, path="/nope")
+        self.assertEqual(status, 404)
+
+    def test_health_with_valid_secret_returns_ok_and_assistant_name(self):
+        status, payload = self._get("/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertIn("assistant", payload)
+
+    def test_health_with_wrong_secret_is_rejected(self):
+        status, payload = self._get("/health", secret="wrong")
+        self.assertEqual(status, 401)
+        self.assertFalse(payload["ok"])
+
+    def test_health_with_missing_secret_is_rejected(self):
+        status, payload = self._get("/health", secret="__omit__")
+        self.assertEqual(status, 401)
+
+    def test_unknown_get_path_is_404(self):
+        status, payload = self._get("/nope")
         self.assertEqual(status, 404)
 
     def test_oversized_body_is_rejected(self):

@@ -1,0 +1,40 @@
+name: JarvisCompanion
+options:
+  bundleIdPrefix: com.brooksmoore.aissistant
+  deploymentTarget:
+    iOS: "15.0"
+configs:
+  Debug: debug
+  Release: release
+targets:
+  JarvisCompanion:
+    type: application
+    platform: iOS
+    sources:
+      - path: JarvisCompanion/Sources
+    info:
+      path: JarvisCompanion/Info.plist
+      properties:
+        CFBundleDisplayName: Jarvis
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: Jarvis Companion talks to the webhook running on your Mac (over Wi-Fi or Tailscale).
+        NSAppTransportSecurity:
+          # The backend runs on Brooks's own Mac (LAN today, a private
+          # Tailscale tailnet later), reached over plain HTTP with a shared
+          # secret rather than TLS. This app makes network calls to exactly
+          # one attacker-uncontrolled destination (the URL typed into
+          # Settings by Brooks himself, stored in Keychain) — arbitrary-loads
+          # is scoped by that fact, not by an Info.plist domain list, since
+          # the host isn't known until runtime. Revisit once the backend is
+          # reachable over Tailscale's free *.ts.net HTTPS certs
+          # (`tailscale cert`), at which point this whole key can be deleted.
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.brooksmoore.aissistant.jarviscompanion
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.5"
+        TARGETED_DEVICE_FAMILY: "1"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic

@@ -58,6 +58,20 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        """Liveness check for a companion app's "Connected" indicator — same
+        secret as /capture (a health endpoint that answers unauthenticated
+        would let anyone on the LAN/tailnet fingerprint that this port is an
+        aissistant instance) and reveals nothing beyond that fact."""
+        if self.path != "/health":
+            self._json(404, {"ok": False, "error": "not found"})
+            return
+        given = self.headers.get("X-Aissistant-Secret", "")
+        if not hmac.compare_digest(given, WEBHOOK_SECRET):
+            self._json(401, {"ok": False, "error": "unauthorized"})
+            return
+        self._json(200, {"ok": True, "assistant": ASSISTANT_NAME})
+
     def do_POST(self):
         if self.path != "/capture":
             self._json(404, {"ok": False, "error": "not found"})
