@@ -22,6 +22,7 @@ LOG_STALE_MINUTES = 15       # zero log activity in this window -> process looks
 ERROR_WINDOW_MINUTES = 10    # look at this recent a slice of the log for network errors
 ERROR_THRESHOLD = 5          # this many NetworkError/TimedOut lines in the window -> stuck poller
 ALERT_COOLDOWN_MINUTES = 60  # don't re-alert on the same ongoing incident more than hourly
+GOOGLE_AUTH_WINDOW_MINUTES = 1440  # gmail/calendar poll infrequently — a full day catches one cycle
 TAIL_BYTES = 2_000_000       # logs get large; the last ~2MB comfortably covers a 15-min window
 
 STATE_FILE = BASE / "heartbeat_state.txt"  # small, local, gitignored alongside instances/
@@ -72,6 +73,15 @@ def check_instance(instance: str) -> str | None:
     if len(errors) >= ERROR_THRESHOLD:
         return (f"{instance}: {len(errors)} Telegram network errors in the last "
                 f"{ERROR_WINDOW_MINUTES} min — likely stuck (2026-07-14-class outage).")
+    # A dead Google grant is silent by design: every calendar/gmail call fails
+    # soft, so the bot keeps answering normally while simply never seeing an
+    # event or an email again. Penny's expired on 2026-07-16 and nobody noticed
+    # for nine days. The whole point of this watchdog is "alive but not
+    # actually working", and this is exactly that shape.
+    if any("invalid_grant" in l for l in _log_lines_since(log_path, GOOGLE_AUTH_WINDOW_MINUTES)):
+        return (f"{instance}: Google auth is dead (invalid_grant — token expired or revoked). "
+                f"Calendar and email are silently doing nothing. Re-run: "
+                f"AISSISTANT_INSTANCE={instance} ./venv/bin/python setup_google.py")
     return None
 
 

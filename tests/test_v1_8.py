@@ -948,3 +948,92 @@ class TestGuardDoesNotOfferAnEscapeHatchWhenActionWasAsked(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBrokenGoogleAuthIsNotAnEmptyCalendar(unittest.TestCase):
+    """penny's Google grant died 2026-07-16 and for the nine days after it her
+    calendar simply looked EMPTY — to the model on every turn, and to anyone
+    who asked her what was coming up. upcoming_events() returns [] on any
+    failure and _upcoming_text_fresh turned [] into "(no events in the next 7
+    days)", which is an affirmative lie rather than a missing feature."""
+
+    def setUp(self):
+        import gcal
+        self.gcal = gcal
+        self.gcal._auth_state["broken"] = False
+        self.gcal._cal_cache.update(ts=0.0, text="")
+        # test_live.py points gcal.GOOGLE_TOKEN at a nonexistent file at import
+        # time, and `unittest discover` imports it — so enabled() is False by
+        # the time this class runs in the full suite. Don't depend on either.
+        self._orig_enabled = gcal.enabled
+        gcal.enabled = lambda: True
+
+    def tearDown(self):
+        self.gcal.enabled = self._orig_enabled
+        self.gcal._auth_state["broken"] = False
+        self.gcal._cal_cache.update(ts=0.0, text="")
+
+    def test_a_dead_grant_is_recorded_not_swallowed(self):
+        class _RefreshError(Exception):
+            pass
+        _RefreshError.__name__ = "RefreshError"
+
+        orig = self.gcal._svc
+        self.gcal._svc = lambda: (_ for _ in ()).throw(_RefreshError("invalid_grant: Token expired"))
+        try:
+            self.assertEqual(self.gcal.upcoming_events(7), [])
+            self.assertTrue(self.gcal.auth_broken())
+        finally:
+            self.gcal._svc = orig
+
+    def test_the_state_block_text_refuses_to_claim_an_empty_calendar(self):
+        self.gcal._auth_state["broken"] = True
+        orig = self.gcal.upcoming_events
+        self.gcal.upcoming_events = lambda days=7: []
+        try:
+            text = self.gcal._upcoming_text_fresh(7)
+        finally:
+            self.gcal.upcoming_events = orig
+        self.assertIn("UNREADABLE", text)
+        self.assertNotIn("no events", text)
+
+    def test_a_genuinely_empty_calendar_still_reads_as_empty(self):
+        orig = self.gcal.upcoming_events
+        self.gcal.upcoming_events = lambda days=7: []
+        try:
+            self.assertIn("no events", self.gcal._upcoming_text_fresh(7))
+        finally:
+            self.gcal.upcoming_events = orig
+
+
+class TestHeartbeatCatchesDeadGoogleAuth(unittest.TestCase):
+    """"Alive but not actually working" is this watchdog's entire reason to
+    exist, and a dead Google grant is exactly that shape — nine days silent."""
+
+    def setUp(self):
+        import heartbeat
+        self.heartbeat = heartbeat
+
+    def _check_with_log(self, lines):
+        orig_run, orig_lines = self.heartbeat._process_running, self.heartbeat._log_lines_since
+        self.heartbeat._process_running = lambda instance: True
+        self.heartbeat._log_lines_since = lambda path, minutes: lines
+        try:
+            return self.heartbeat.check_instance("penny")
+        finally:
+            self.heartbeat._process_running = orig_run
+            self.heartbeat._log_lines_since = orig_lines
+
+    def test_invalid_grant_in_the_log_raises_an_alert_naming_the_fix(self):
+        alert = self._check_with_log([
+            "2026-07-25 08:00:40,007 penny.gcal ERROR calendar fetch failed",
+            "google.auth.exceptions.RefreshError: ('invalid_grant: Token has been expired or revoked.')",
+        ])
+        self.assertIsNotNone(alert)
+        self.assertIn("Google auth is dead", alert)
+        self.assertIn("setup_google.py", alert)
+
+    def test_a_healthy_log_still_reports_healthy(self):
+        self.assertIsNone(self._check_with_log([
+            "2026-07-25 17:34:12,208 apscheduler INFO Job check_reminders executed successfully",
+        ]))

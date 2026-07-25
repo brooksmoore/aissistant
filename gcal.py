@@ -39,8 +39,22 @@ def _svc():
     return _service
 
 
+def auth_broken() -> bool:
+    """True when the stored token exists but Google refuses to refresh it.
+
+    Set by the last failed call, cleared by the next successful one. Exists
+    because "[]" from upcoming_events used to mean BOTH "no events" and "I
+    cannot read your calendar at all" — see _upcoming_text_fresh."""
+    return _auth_state["broken"]
+
+
+_auth_state = {"broken": False}
+
+
 def upcoming_events(days=7) -> list:
-    """Returns [{id, title, start, end}] for the next N days, [] on any failure."""
+    """Returns [{id, title, start, end}] for the next N days, [] on any failure.
+    Callers that need to tell an empty calendar apart from an unreadable one
+    must check auth_broken() — see _upcoming_text_fresh."""
     if not enabled():
         return []
     try:
@@ -58,9 +72,17 @@ def upcoming_events(days=7) -> list:
             start = e["start"].get("dateTime", e["start"].get("date", ""))
             end = e["end"].get("dateTime", e["end"].get("date", ""))
             events.append({"id": e["id"], "title": e.get("summary", "(untitled)"), "start": start, "end": end})
+        _auth_state["broken"] = False
         return events
-    except Exception:
+    except Exception as e:
         log.exception("calendar fetch failed")
+        # RefreshError means the stored grant is dead (revoked, or expired
+        # because the OAuth app is still in "Testing" publishing status, where
+        # Google expires refresh tokens after 7 days). That is a completely
+        # different situation from a transient network blip and must not be
+        # reported to the owner as "no events".
+        if "invalid_grant" in str(e) or type(e).__name__ == "RefreshError":
+            _auth_state["broken"] = True
         return []
 
 
@@ -79,6 +101,15 @@ def upcoming_text(days=7) -> str:
 
 def _upcoming_text_fresh(days=7) -> str:
     events = upcoming_events(days)
+    if not events and auth_broken():
+        # This string goes into the state block on EVERY turn. Saying "no
+        # events" here is an affirmative lie the model then repeats with
+        # confidence: penny's Google grant died on 2026-07-16 and for the nine
+        # days after it, her calendar looked simply empty — to the model and to
+        # anyone who asked her what was coming up.
+        return ("(CALENDAR UNREADABLE — the Google connection has expired and needs re-authorizing. "
+                "You do NOT know what is on the calendar right now: never say it is empty or clear, "
+                "never answer a calendar question from this. Say the connection needs reconnecting.)")
     if not events:
         return "(no events in the next %d days)" % days
     lines = []
