@@ -4,9 +4,9 @@ processes it watches — the whole point is that this keeps working even if a
 bot's own internal loop wedges. Confirmed incident (2026-07-14): both jarvis
 and penny sat silently stuck in a Telegram long-poll network-error loop for
 ~6 hours — process alive (launchd showed a PID, KeepAlive never triggered),
-scheduler jobs still firing, but Telegram unreachable — before Brooks
-happened to message Jarvis and notice. Jordan never noticed Penny was down
-at all. Alerts via a macOS local notification, not Telegram: alerting
+scheduler jobs still firing, but Telegram unreachable — before the owner
+happened to message his bot and notice. The other instance's owner never
+noticed hers was down at all. Alerts via a macOS local notification, not Telegram: alerting
 through the exact channel that might be the thing that's broken would defeat
 the purpose. Zero model calls, zero API cost, does not import
 bot.py/brain.py/scheduler.py — nothing in this file can be affected by

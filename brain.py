@@ -1068,7 +1068,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     #   - jarvis, 2026-07-19: asked for a Brian reminder and a pushup reset, it
     #     did both, then added "and marked the car clubs done" — an item the
     #     message never mentioned and complete_item was never called on.
-    #   - penny, 2026-07-24: "REVOLVE return and Brooks movie checked off. I'll
+    #   - penny, 2026-07-24: "REVOLVE return and movie night checked off. I'll
     #     ping you tomorrow morning at 8 AM about the Nespresso order." Both
     #     check-offs were real; the Nespresso reschedule never happened, and
     #     that item's due date is still the one from six days earlier.
@@ -1106,7 +1106,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     # already returned the Revolve package but remind me next week to check if
     # I got a refund... and remind me tomorrow to order more Nespresso or
     # remind me on Friday as well." Penny asked which day she meant and saved
-    # NOTHING, completed NOTHING. Jordan never answered, so the refund reminder
+    # NOTHING, completed NOTHING. She never answered, so the refund reminder
     # has never existed, and the REVOLVE item kept being listed as due for two
     # more days until she asked a second time. An unanswered question is a
     # silent data-loss path; banking the unambiguous parts first makes it safe.

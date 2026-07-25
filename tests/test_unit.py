@@ -260,7 +260,7 @@ class TestReminderTiming(unittest.TestCase):
         self.assertEqual(due[0]["remind_count"], 0)
 
     def test_reminder_text_honors_emoji_and_overdue_prefs(self):
-        """Regression for the bug Brooks caught live: reminder text is a plain
+        """Regression for a bug caught live: reminder text is a plain
         f-string, never seen by the model, so a preference must be read by
         scheduler.py directly or it's silently ignored no matter what the
         model promised in chat."""

@@ -170,7 +170,7 @@ anything real, reply with exactly NONE."""
 
 
 def _pattern_review_text() -> str | None:
-    """One weekly Haiku pass over her items for pattern insights ("Jordan tasks
+    """One weekly Haiku pass over her items for pattern insights ("her tasks
     cluster and slip together"). Returns None on any failure, thin data, or
     budget stop — the weekly message just goes out without it."""
     import brain  # deferred: brain imports memory; avoid an import cycle at module load

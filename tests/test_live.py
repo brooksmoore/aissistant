@@ -4,7 +4,7 @@ comprehension, effectiveness, and per-turn cost efficiency against the actual mo
 Run:  ./venv/bin/python tests/test_live.py          (~3-5 cents, isolated DB)
 Refuses to run past the budget cap. Never touches the real penny.db, and never
 touches a real Google Calendar/Gmail — whichever instance's .env this runs
-under (AISSISTANT_INSTANCE=penny is Google-connected for the real Jordan), gcal
+under (AISSISTANT_INSTANCE=penny is Google-connected for the real owner), gcal
 is forced off below BEFORE brain is imported, so create_calendar_event is
 never offered to the model and no real event can be created or deleted."""
 import os

@@ -1,4 +1,4 @@
-"""Owner's report — Brooks's window into how Penny is doing without asking Jordan.
+"""Owner's report — the installer's window into how an instance is doing without quizzing its owner.
 Run:  ./venv/bin/python report.py [days]     (default 7; zero API cost)"""
 import sys
 from datetime import datetime, timedelta

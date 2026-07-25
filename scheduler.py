@@ -377,7 +377,7 @@ def digest_buckets(items: list, now: datetime) -> tuple:
     #
     # Rotated, not just capped. Undated backlog never expires on its own, so a
     # fixed [:3] slice of a stably-ordered list offers the SAME three items
-    # every single morning — penny's "let Brooks pick timing for birthday
+    # every single morning — penny's "pick timing for birthday
     # sushi" and "check Partiful reminders" led this section every day for over
     # two weeks (nagged 7 and 8 times), which trains the reader to skip the
     # section entirely. Rotating by day-of-year gives every undated item a turn

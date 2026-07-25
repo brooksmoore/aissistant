@@ -619,7 +619,7 @@ class TestSmartDigestFallback(unittest.TestCase):
 class TestDigestDoesNotSilentlyDropDueItems(unittest.TestCase):
     """Real incident (2026-07-14, jarvis): a hardcoded [:6] cutoff on "needs you
     today" dropped two genuinely-due items (call Riley, text Casey) with
-    no indication anything was missing — Brooks had to notice and ask why."""
+    no indication anything was missing — the owner had to notice and ask why."""
 
     def setUp(self):
         fresh_db()

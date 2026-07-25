@@ -304,7 +304,7 @@ class TestPartialFulfillmentGuard(unittest.TestCase):
       - jarvis 2026-07-19: a Brian reminder and a pushup reset both happened,
         then the reply added "and marked the car clubs done" — an item the
         message never mentioned, never completed.
-      - penny 2026-07-24: "REVOLVE return and Brooks movie checked off. I'll
+      - penny 2026-07-24: "REVOLVE return and movie night checked off. I'll
         ping you tomorrow morning at 8 AM about the Nespresso order." Both
         check-offs real; the Nespresso reschedule never happened, and six days
         later that item still carried its original due date."""
@@ -379,7 +379,7 @@ class TestQuestionMustNotSwallowTheMessage(unittest.TestCase):
     "I already returned the Revolve package but remind me next week to check if
     I got a refund... and remind me tomorrow to order more Nespresso or remind
     me on Friday as well." Penny asked which day she meant and saved NOTHING,
-    completed NOTHING. Jordan never answered, so the refund reminder has never
+    completed NOTHING. She never answered, so the refund reminder has never
     existed, and the REVOLVE item kept being listed as due for two more days."""
 
     def setUp(self):
@@ -550,7 +550,7 @@ class TestDigestEntryLabels(unittest.TestCase):
     def test_overdue_item_is_labeled_with_its_real_date(self):
         now = datetime.now(config.TZ)
         past = now - timedelta(days=3)
-        i = memory.add_item("See movie with Brooks at Odyssey", due_at=iso(past))
+        i = memory.add_item("See movie at the Odyssey", due_at=iso(past))
         label = self.scheduler.digest_entry_label(memory.get_item(i), now)
         self.assertIn("overdue", label)
         self.assertIn(past.strftime("%B %-d"), label)
@@ -602,7 +602,7 @@ class TestDigestTidying(unittest.TestCase):
 
 
 class TestSpareEnergyRotates(unittest.TestCase):
-    """penny's "let Brooks pick timing for birthday sushi" and "check Partiful
+    """penny's "pick timing for birthday sushi" and "check Partiful
     reminders" led the spare-energy section every single morning for over two
     weeks (nagged 7 and 8 times) because a fixed [:3] slice of a stably-ordered
     list is the same three items forever."""
