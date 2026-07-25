@@ -605,7 +605,13 @@ class TestSmartDigestFallback(unittest.TestCase):
             run(self.scheduler.morning_digest(FakeContext()))
         finally:
             self.brain.compose_digest = orig
-        self.assertEqual(seen["due"], ["due today thing"])
+        # the due-today entries now carry their real date + an overdue marker
+        # (scheduler.digest_entry_label) so the model can't describe a
+        # days-old item as "tonight" — but they must still be exactly the
+        # items digest_buckets chose, one label per item, nothing re-derived
+        self.assertEqual(len(seen["due"]), 1)
+        self.assertTrue(seen["due"][0].startswith("due today thing"))
+        self.assertIn("due today at", seen["due"][0])
         self.assertEqual(seen["spare"], ["undated backlog thing"])
         self.assertEqual(seen["n"], 2)
 

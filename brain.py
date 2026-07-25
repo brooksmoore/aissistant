@@ -124,7 +124,16 @@ safety. Default when multiple candidates exist: "that reminder" right after a [r
 means THAT ping, not an item discussed earlier in the conversation, unless {_S} names the earlier item explicitly. \
 NEVER guess toward dropping, canceling, completing, or rescheduling the WRONG item — especially anything involving \
 another named person — when genuinely torn between candidates; ask first in THAT case only. A wrong guess that \
-touches is far worse than one extra question. Real incident (2026-07-19, jarvis): asked to reset a pushup count \
+touches is far worse than one extra question. But asking is NOT free and is never the safe default: a plain \
+"remind me to X" — with or without a day — is already complete, and asking what {_S} intends to do about it, which \
+night {_S} wants, or whether {_S} means research or booking is friction {_S} has pushed back on twice. If the only \
+thing missing is a time, save it with no due date; don't interrogate. NEVER let a question swallow the rest of the \
+message: when one message holds several asks and only one is ambiguous, capture and complete every unambiguous part \
+FIRST, in the same turn, then ask about the remainder only — a question with nothing saved behind it loses the \
+whole message if {_S} doesn't reply (live: three asks lost that way on 2026-07-22, and one of them never came back). \
+When one message becomes several items, do NOT give them all the same due time just because they arrived together — \
+stagger them into a workable sequence, or leave the flexible ones undated; two items you stacked at 9am become a \
+"conflict" you then warn {_O} about, which is noise you manufactured. Real incident (2026-07-19, jarvis): asked to reset a pushup count \
 and set a reminder, the model also silently called complete_item on "Take clubs out of car" — an item the message \
 never referenced at all, apparently pattern-matched from an unrelated "car"-adjacent item completed the day \
 before. complete_item/update_item must ONLY ever target an item {_S} explicitly named or unambiguously referred to \
@@ -180,7 +189,11 @@ sentence. emoji_level and reminder_overdue_label genuinely govern reminders/dige
 chat. Custom reminder wording (E2) is real: set_preference/update_item's reminder_text applies {_P} exact phrasing \
 to every future ping on an item ("0/100 done today" instead of "Reminder: pushups"). daily_ping_cap limits how \
 many proactive pings {_S} gets per day (state block shows pings today: N (cap M)) — if {_S} asks why {_S} got pinged \
-so much, or asks for fewer, set it. Style feedback gets stored immediately, permanently. NEVER say something is \
+so much, or asks for fewer, set it. Style feedback gets stored immediately, permanently — and "stop telling me about X", "those are minor, just a \
+simple reminder", "don't give me a heads up about Y" are all style feedback: they get a set_preference or a \
+remember_fact THAT TURN, plus one sentence confirming it. Letting one pass with a silent nod means it comes back \
+tomorrow and {_S} has to say it twice (live: a "no heads up about the daily texts" instruction on 2026-07-19 was \
+never acknowledged or stored). NEVER say something is \
 changed, saved, paused, or turned off without a successful tool call behind it — if no tool covers the request, \
 say so plainly instead of confirming a change that didn't happen.
 
@@ -188,7 +201,14 @@ KNOWLEDGE: Answer general-knowledge questions confidently (which stores carry wh
 cooking, travel basics). You have no live internet — share what you know and name the one thing worth verifying; \
 never a bare "look it up yourself."
 
-TIME: Resolve every relative date against the current datetime below to explicit ISO in {TIMEZONE}. When \
+TIME: Resolve every relative date against the current datetime below to explicit ISO in {TIMEZONE}. Every weekday \
+name — in a tool call OR in a sentence you say out loud — comes from the dated weekday table below \
+(the "Date table" line), never from arithmetic. This applies to recurring items too: a "every Thursday" item's next occurrence is the next \
+Thursday IN THAT TABLE, and when you tell {_O} when something next pings, look up the weekday for that stored date \
+instead of assuming the stored date matches the weekday it was supposed to be on. A stored date can itself be \
+wrong: if an item's `due` date and the weekday {_S} has always called it don't line up in the table, the DATE is \
+the error — say so and fix it with update_item, don't quietly answer with whichever one is in front of you. Never \
+report a relative day ("tomorrow", "next Friday") without checking the table that it is in fact that day. When \
 calendar tools are present, put anything with a fixed time on the real calendar (item = to-do, event = time block). \
 When answering "what's on my calendar/list" for a day or range, a general fact (a routine, a usual day off) NEVER \
 replaces or hides a specific item due that day — check every open item against the range and merge them in; a day \
@@ -410,9 +430,78 @@ class ToolResult(NamedTuple):
     message: str
 
 
+PAST_TIME_TOLERANCE_SECONDS = 120  # clock skew / a few seconds spent thinking
+
+
+def _reject_past_times(inp: dict, keys: tuple) -> str | None:
+    """Refuses a brand-new due date or ping that already happened. Returns an
+    error message for the model, or None if every given time is fine.
+
+    Live incident (jarvis, 2026-07-24 4:18pm): "remind me in an hour to take
+    Wednesday the 19th and Saturday the 22nd in Workday" was saved with a
+    due_at of 1:18pm THE SAME DAY — three hours in the PAST. The scheduler
+    correctly saw an already-overdue item and fired instantly, then nudged
+    every 30 minutes: 6 pings in 2 hours for one task, a quarter of that
+    day's entire notification volume.
+
+    Nothing in the stack checked this. The model writes raw ISO timestamps by
+    hand, and a slip of a few hours is invisible until the pings start. There
+    is no such thing as a valid brand-new reminder in the past — "remind me"
+    is always forward-looking — so this is safe to reject outright, and one
+    extra round-trip costs a fraction of a cent against six wrong pings.
+    Note the asymmetry with update_item, which may legitimately move a due
+    date backwards (repairing a date that was saved wrong)."""
+    now = datetime.now(TZ)
+    floor = now - timedelta(seconds=PAST_TIME_TOLERANCE_SECONDS)
+    for key in keys:
+        raw = inp.get(key)
+        if not raw:
+            continue
+        # remind_at may carry several times separated by ' | '
+        for part in str(raw).split("|"):
+            dt = memory.parse_dt(part.strip())
+            if dt and dt < floor:
+                return (
+                    f"Rejected — {key}={part.strip()!r} is in the PAST. It is currently "
+                    f"{now.strftime('%A, %B %-d, %Y at %-I:%M %p')}. A new reminder must be in "
+                    f"the future: re-read the current time, recompute the offset the owner "
+                    f"actually asked for (\"in an hour\" = now + 1 hour), and call the tool "
+                    f"again with a future time. Do not narrate this — just fix it."
+                )
+    return None
+
+
+def _describe_update(inp: dict) -> str:
+    """Turns an update_item payload into a plain-English tail for the `did`
+    record ('updated "dinner" (due Sunday, July 26 at 7:15 PM)').
+
+    A bare 'Done — updated "dinner reservation at planta queen"' went out live
+    on 2026-07-22 for a change that turned out to have written the WRONG date
+    — a confirmation that names no value is a confirmation the owner cannot
+    check. Naming the new value is what makes a wrong one catchable."""
+    bits = []
+    for key, label in (("due_at", "due"), ("remind_at", "ping")):
+        if inp.get(key):
+            first = str(inp[key]).split("|")[0].strip()
+            dt = memory.parse_dt(first)
+            bits.append(f"{label} {dt.strftime('%A, %B %-d at %-I:%M %p')}" if dt else f"{label} {first}")
+    if inp.get("title"):
+        bits.append(f'renamed to "{inp["title"]}"')
+    if inp.get("recurrence"):
+        r = inp["recurrence"]
+        bits.append("no longer repeating" if r == "none" else f"repeats {r}")
+    if inp.get("status") == "dropped":
+        bits.append("dropped")
+    if inp.get("priority"):
+        bits.append(f"priority {inp['priority']}")
+    return f" ({', '.join(bits)})" if bits else ""
+
+
 def _run_tool(name: str, inp: dict) -> ToolResult:
     try:
         if name == "capture_item":
+            if err := _reject_past_times(inp, ("due_at", "remind_at")):
+                return ToolResult(False, err)
             item_id = memory.add_item(
                 title=inp["title"],
                 details=inp.get("details", ""),
@@ -445,6 +534,11 @@ def _run_tool(name: str, inp: dict) -> ToolResult:
                 msg += " Target reached — marked complete."
             return ToolResult(True, msg)
         if name == "update_item":
+            # only remind_at is checked here, NOT due_at: moving a due date
+            # backwards is a legitimate repair (a date saved wrong last week),
+            # but a *ping* scheduled in the past can only ever fire instantly.
+            if err := _reject_past_times(inp, ("remind_at",)):
+                return ToolResult(False, err)
             fields = {k: v for k, v in inp.items() if k != "item_id"}
             remind_at = fields.pop("remind_at", None)
             if fields.get("recurrence") == "none":
@@ -582,11 +676,23 @@ def _now_line() -> str:
     # every later reference to that item's due date. Handing over the next 7
     # calendar dates pre-labeled by weekday turns "next Thursday" into a table
     # lookup instead of arithmetic the model has to get right in its head.
+    # 0..14 rather than 1..7: the original one-week table covered "next
+    # Thursday" but not the two cases that then went wrong live on 2026-07-25 —
+    # naming TODAY's own date/weekday, and resolving where a WEEKLY item's next
+    # occurrence lands (which can be up to 7 days out and needs the weekday it
+    # will actually fall on). In one exchange the model called Sunday 07-26
+    # "next Friday (tomorrow)", corrected itself to "next Saturday, August
+    # 1st", and then saved a Thursday-recurring item to Friday 07-31.
     upcoming = ", ".join(
-        (now + timedelta(days=i)).strftime("%A=%m-%d") for i in range(1, 8)
+        (now + timedelta(days=i)).strftime("%a=%Y-%m-%d") for i in range(0, 15)
     )
     return (f"Now: {now.strftime('%A, %B %d, %Y at %I:%M %p')} ({TIMEZONE})\n"
-            f"Next 7 days by weekday (look up the date here — never compute a weekday's date yourself): {upcoming}")
+            f"Date table (the ONLY source for any weekday↔date answer — never compute one "
+            f"yourself, and never trust a date already stored on an item to match its "
+            f"weekday): {upcoming}\n"
+            f"Before you write ANY date into a tool call, or name any weekday in a reply, "
+            f"find it in that table. If a weekday and a date you were about to write don't "
+            f"appear together there, the date is wrong.")
 
 
 def _history() -> list:
@@ -663,6 +769,9 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 
     captured = []   # item titles saved this turn, for the fallback confirmation
     did = []        # plain-English record of every successful non-capture action
+    ran = set()     # names of tools that SUCCEEDED this turn — drives the
+                    # partial-fulfillment checks below, which need to know
+                    # *which* kind of action happened, not just that one did
 
     def _execute_tool_calls(blocks) -> list:
         """Runs every tool_use block, classifies the result into captured/did
@@ -678,12 +787,18 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
                 pre_title = row["title"] if row else None
             result = _run_tool(block.name, block.input)
             ok = result.ok
+            if ok:
+                ran.add(block.name)
+                if block.name == "capture_item" and (block.input.get("remind_at") or block.input.get("due_at")):
+                    ran.add("_set_a_reminder")
+                if block.name == "update_item" and block.input.get("remind_at"):
+                    ran.add("_set_a_reminder")
             if block.name == "capture_item" and ok:
                 captured.append(block.input.get("title", "item"))
             elif ok and block.name == "complete_item" and pre_title:
                 did.append(f"checked off \"{pre_title}\"")
             elif ok and block.name == "update_item" and pre_title:
-                did.append(f"updated \"{pre_title}\"")
+                did.append(f"updated \"{pre_title}\"" + _describe_update(block.input))
             elif ok and block.name == "log_progress" and pre_title:
                 did.append(f"logged progress on \"{pre_title}\" ({result.message})")
             elif ok and block.name == "set_preference":
@@ -729,6 +844,65 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
 
+    def _confirmation_from(new_captured: list, new_did: list) -> str:
+        """The deterministic confirmation — built from what actually succeeded,
+        never from prose. Same wording as the no-text fallback at the bottom of
+        respond(), factored out so the guards can substitute it."""
+        if new_captured:
+            return "Got it — " + ", ".join(new_captured[:8]) + ". All on the list."
+        if new_did:
+            # NOT .capitalize() — that lowercases everything after the first
+            # character, so 'checked off "Code by the pool and tan"' came back
+            # as 'code by the pool and tan' and the confirmation stopped
+            # matching the item's real name. The string already starts capital.
+            return "Done — " + " and ".join(new_did[:3]) + "."
+        return ""
+
+    def _corrective(note: str) -> tuple:
+        """One corrective round-trip. Appends the model's last turn plus an
+        automated-check note, re-asks, runs whatever tools come back, and
+        reports what the retry itself accomplished.
+
+        Returns (new_text, work_done: bool) where work_done means the RETRY
+        (not an earlier round-trip) successfully ran at least one tool."""
+        nonlocal resp
+        before_c, before_d = len(captured), len(did)
+        messages.append({"role": "assistant", "content": resp.content})
+        messages.append({"role": "user", "content": [{"type": "text", "text": note}]})
+        resp = _create(messages)
+        _execute_tool_calls(resp.content)
+        retry_text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        return retry_text, (len(captured) > before_c or len(did) > before_d)
+
+    def _scrub_self_correction(retry_text: str, work_done: bool) -> str:
+        """Replaces an apologetic retry reply with the plain confirmation of
+        what actually happened.
+
+        THE most-complained-about behaviour in the 07-13→07-25 window, and the
+        reason criterion 6 failed: 23 guard trips on jarvis, and in every case
+        traced back to the items table the action DID succeed on the retry —
+        the owner was told "You're right — I didn't actually capture that" and
+        "You're right — I need to actually complete that item" about work that
+        was, at that exact second, committed to the database. He answered one
+        of them with a bare "What?".
+
+        The corrective note already asks the model not to say "you're right".
+        Haiku ignores that instruction most of the time, and no amount of
+        re-wording a prompt makes it a guarantee. But the code KNOWS the retry
+        succeeded — captured/did are populated — so the apology can simply be
+        thrown away and replaced with the deterministic confirmation. Only
+        applies inside a guard retry, where the premise is that the owner never
+        corrected anything, so there is nothing to legitimately apologize for."""
+        if not work_done:
+            return retry_text
+        if retry_text and not SELF_CORRECTION_RE.search(retry_text):
+            return retry_text  # the retry answered cleanly — leave it alone
+        replacement = _confirmation_from(captured, did)
+        if replacement:
+            log.info("scrubbed self-correcting prose from a successful retry: %r", retry_text[:200])
+            return replacement
+        return retry_text
+
     # Empty-promise guard: the model stated a change ("turned off", "saved
     # that", ...) but made zero tool calls this turn. Give it exactly one
     # corrective round-trip — either it actually makes the calls now, or it
@@ -748,8 +922,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     if text and not captured and not did and (claims_change(text) or llm_claims_change(text)):
         n = memory.bump_counter("incident_claims")
         log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:600])
-        messages.append({"role": "assistant", "content": resp.content})
-        messages.append({"role": "user", "content": [{"type": "text", "text": (
+        text, work_done = _corrective(
             f"(automated system check, not a message from {_O} — {_S} has not seen your "
             "last reply yet and did not correct you: your last reply reads like it's "
             f"claiming a change happened, but no tool call succeeded this turn. Look at "
@@ -762,10 +935,8 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             "at all. Whichever it is, do not say 'you're right', don't reference this "
             f"check, don't apologize for a mistake {_S} hasn't actually raised — reply as "
             f"your first and only response to {_O}.)"
-        )}]})
-        resp = _create(messages)
-        _execute_tool_calls(resp.content)
-        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        )
+        text = _scrub_self_correction(text, work_done)
         # Real incident (2026-07-18, jarvis): the corrective round-trip itself
         # produced a second hollow claim ("You're back to 25/100 — next
         # reminder at 5:02pm") with no tool call behind it either, three
@@ -783,6 +954,69 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             # nothing to resend). Don't presume which one this is.
             text = "Something's not adding up between what I said and what's actually saved — let me know how you'd like this handled."
 
+    # Partial-fulfillment check: the empty-promise guard above only ever runs
+    # when ZERO tools succeeded. A turn that does three real things and
+    # fabricates a fourth sails straight past it, and two of those shipped live:
+    #
+    #   - jarvis, 2026-07-19: asked for a Brian reminder and a pushup reset, it
+    #     did both, then added "and marked the car clubs done" — an item the
+    #     message never mentioned and complete_item was never called on.
+    #   - penny, 2026-07-24: "REVOLVE return and Brooks movie checked off. I'll
+    #     ping you tomorrow morning at 8 AM about the Nespresso order." Both
+    #     check-offs were real; the Nespresso reschedule never happened, and
+    #     that item's due date is still the one from six days earlier.
+    #
+    # Both are the same shape: a claim of a KIND of action no tool of that kind
+    # backed. Checked deterministically by kind rather than by asking the model
+    # to grade itself — no extra API call, no added latency on the common path.
+    if text and (captured or did):
+        unbacked = []
+        if PROMISED_REMINDER_RE.search(text) and "_set_a_reminder" not in ran:
+            unbacked.append("a future reminder/ping, but no reminder was created or moved")
+        if CLAIMED_COMPLETION_RE.search(text) and "complete_item" not in ran and "log_progress" not in ran:
+            unbacked.append("that something was checked off/completed, but no item was completed")
+        if unbacked:
+            n = memory.bump_counter("incident_claims")
+            log.warning("partial-fulfillment guard tripped (incident #%d today): claims %s — ran=%s — %r",
+                        n, unbacked, sorted(ran), text[:600])
+            text, work_done = _corrective(
+                f"(automated system check, not a message from {_O} — {_S} has not seen your "
+                "reply yet and did not correct you. Some of your tool calls this turn "
+                "succeeded, but your reply also claims " + "; ".join(unbacked) + ". Every "
+                "part of a reply needs a real tool call behind it, not just the first part. "
+                f"If {_S} did ask for that, make the missing call NOW and then confirm "
+                "everything — the parts that already worked and the part you just fixed — in "
+                "one reply. If you misread and it was never asked for, simply restate the "
+                "real actions and drop the claim. Do not say 'you're right', do not "
+                f"apologize for a mistake {_S} hasn't raised, do not mention this check; "
+                f"reply as your first and only response to {_O}.)"
+            )
+            text = _scrub_self_correction(text, work_done)
+
+    # Asked-a-question-and-saved-nothing check: one clarifying question is
+    # allowed, but it must not swallow the parts of the message that were
+    # perfectly clear. Live (penny, 2026-07-22 9:02pm) one message said "I
+    # already returned the Revolve package but remind me next week to check if
+    # I got a refund... and remind me tomorrow to order more Nespresso or
+    # remind me on Friday as well." Penny asked which day she meant and saved
+    # NOTHING, completed NOTHING. Jordan never answered, so the refund reminder
+    # has never existed, and the REVOLVE item kept being listed as due for two
+    # more days until she asked a second time. An unanswered question is a
+    # silent data-loss path; banking the unambiguous parts first makes it safe.
+    if text and not captured and not did and "?" in text and CAPTURE_INTENT_RE.search(user_text):
+        log.warning("clarifying question saved nothing; re-asking for a partial capture: %r", text[:300])
+        text, _work = _corrective(
+            f"(automated system check, not a message from {_O} — {_S} has not seen your reply "
+            f"yet: your reply asks a question but nothing at all was saved, completed, or "
+            f"changed this turn, and {_P} message clearly asked you to record something. An "
+            "unanswered question loses the whole message. Act on every part that is already "
+            "unambiguous — capture the items, check off what was said to be done — then ask "
+            "your question about ONLY the genuinely ambiguous remainder, in the same reply. "
+            "If a bare deadline is missing but the ask itself is clear, just save it with no "
+            "due date rather than asking. Do not mention this check; reply as your first and "
+            f"only response to {_O}.)"
+        )
+
     # Capture-completeness check: a long message that saved at least one item
     # gets a cheap second look for siblings the model missed ("a rambling
     # paragraph may hold six items"). One corrective round-trip max; the checker
@@ -791,8 +1025,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         missed = _missed_captures(user_text, captured)
         if missed:
             log.warning("capture check found %d possibly-missed item(s): %r", len(missed), missed)
-            messages.append({"role": "assistant", "content": resp.content})
-            messages.append({"role": "user", "content": [{"type": "text", "text": (
+            text, _work = _corrective(
                 f"(automated system check, not a message from {_O} — {_S} has not seen your "
                 f"reply yet: {_P} message may have contained items you did not capture: "
                 + "; ".join(missed[:5]) + f". If any of these are genuinely distinct new items "
@@ -800,18 +1033,10 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
                 "they are duplicates of items you already saved or not actually asks, change "
                 "nothing and simply restate your confirmation. Reply as your first and only "
                 f"response to {_O} — do not mention this check.)"
-            )}]})
-            resp = _create(messages)
-            _execute_tool_calls(resp.content)
-            text = "".join(b.text for b in resp.content if b.type == "text").strip()
+            )
 
     if not text:
-        if captured:
-            text = "Got it — " + ", ".join(captured[:8]) + ". All on the list."
-        elif did:
-            text = ("Done — " + " and ".join(did[:3]) + ".").capitalize()
-        else:
-            text = "That didn't save properly on my end — send it once more?"
+        text = _confirmation_from(captured, did) or "That didn't save properly on my end — send it once more?"
     memory.log_msg("assistant", text)
     return text
 
@@ -834,6 +1059,54 @@ def claims_change(text: str) -> bool:
     deliberately conservative (see CLAIM_PATTERN); false positives just cost
     one cheap corrective retry, not a wrong answer."""
     return bool(_CLAIM_RE.search(text))
+
+
+# Apologetic/self-correcting phrasing. Only ever consulted INSIDE a guard
+# retry, where the premise is that the owner corrected nothing — so every one
+# of these is describing a fault that either didn't happen or was already
+# repaired by the retry's own tool call. Verbatim from the live transcripts
+# that made this list necessary (jarvis, 2026-07-19 → 07-24).
+SELF_CORRECTION_RE = re.compile(
+    r"you'?re right|you are right|my mistake|i apologi|sorry|"
+    r"(?:i )?need to actually|didn'?t actually|did not actually|i didn'?t (?:save|capture|make|complete)|"
+    r"let me (?:do|fix|try|save|complete|actually)|looking back|i should(?:'ve| have)|"
+    r"that didn'?t (?:save|work|go through)|i failed to",
+    re.IGNORECASE,
+)
+
+# A promise that a ping now exists. Future tense on purpose — "I'll remind you
+# tonight" is exactly the shape of the unbacked promise that shipped live.
+PROMISED_REMINDER_RE = re.compile(
+    r"i'?ll (?:remind|ping|nudge|text|message|give you a (?:heads up|shout))|"
+    r"i will (?:remind|ping|nudge)|"
+    # deliberately NOT "reminder for ..." — that phrasing usually *reports* an
+    # existing ping ("your reminder for the dentist is tomorrow") rather than
+    # promising a new one, and flagging it would fire on plain state questions
+    r"remind(?:er|ers)? (?:is |are )?(?:now )?set|"
+    r"ping(?:ing|ed)? you|pinged (?:at|in|tomorrow|tonight)|"
+    r"you'?ll (?:get|hear) a (?:reminder|ping|nudge)",
+    re.IGNORECASE,
+)
+
+# A claim that something got completed.
+CLAIMED_COMPLETION_RE = re.compile(
+    r"checked (?:that |it |them )?off|check(?:ing)? that off|marked (?:it |that |them )?"
+    r"(?:as )?(?:done|complete)|marked the .{1,40}? done|"
+    r"\bcompleted\b|crossed (?:it |that |them )?off|"
+    r"(?:is|are) (?:now )?(?:done|off your (?:list|plate))",
+    re.IGNORECASE,
+)
+
+# Does the owner's message actually ask for something to be recorded? Gates the
+# "asked a question and saved nothing" net so ordinary conversation, questions,
+# and chit-chat never trigger a pointless corrective round-trip.
+CAPTURE_INTENT_RE = re.compile(
+    r"remind me|don'?t let me forget|add (?:a |an |to )?|put .{0,20}on (?:my|the) list|"
+    r"save (?:this|that|it)|check (?:that |this |it )?off|cross (?:that |this |it )?off|"
+    r"mark .{0,30}(?:done|complete)|i (?:already |just )?(?:did|finished|completed|returned|sent|called)|"
+    r"complete the|i'?ve (?:done|finished)|keep reminding me|continue to remind me",
+    re.IGNORECASE,
+)
 
 
 JUDGE_PROMPT = """Reply with exactly one word, YES or NO.
@@ -908,12 +1181,16 @@ DIGEST_PROMPT = """{state}
 
 Authoritative for today's digest — already correctly filtered by code, do not
 second-guess, add to, or drop from these two lists; your job is order and
-tone only, not filtering:
+tone only, not filtering. Each due-today entry carries its real due date and
+whether it is already overdue — use those words, do not re-derive them:
 Due today: {due_today_list}
 Spare energy (undated, optional, offer only if non-empty): {spare_energy_list}
 
 Write the owner's morning digest for {today}. Rules:
 - Using ONLY the "Due today" list above, order those items into a realistic sequence given their times (see the state below for exact times); name the ONE thing that matters most first.
+- An entry marked (overdue, was due <date>) is NOT happening today and must never be described as "tonight", "this morning" or "today at" — it already passed; say it's still open from that date. A movie last Tuesday called "tonight at 7 PM" three mornings running is the exact failure this rule exists for.
+- Do not state any count, total, or "you have N items" other than the closing line — a miscounted tally reads as carelessness about everything else.
+- Sentence case, like normal writing: never all-lowercase, and do not open with your own date or "Morning digest" header — one is already added above your text.
 - Then a "Heads up:" section ONLY if you find real problems in the next 3 days using the state below: time conflicts, an item missing obvious prep (a gift not bought before its wrapping day), or something due on a day off. Skip the section entirely if there are none — never invent a concern.
 - If the spare-energy list above is non-empty, offer those exact items as "if there's spare energy" — nothing else belongs in that section, and nothing from it belongs in "due today" or vice versa.
 - Plain text, no markdown headers/bold, max 12 short lines, warm but not chatty. Do not greet by name. Never claim anything was changed or handled — this is a read-only summary.
@@ -940,7 +1217,7 @@ def compose_digest(due_today_titles: list = None, spare_energy_titles: list = No
         import scheduler
         items = memory.open_items()
         due_today, spare_energy = scheduler.digest_buckets(items, now)
-        due_today_titles = [i["title"] for i in due_today]
+        due_today_titles = [scheduler.digest_entry_label(i, now) for i in due_today]
         spare_energy_titles = [i["title"] for i in spare_energy]
         n_open = len(items)
     try:
@@ -948,7 +1225,7 @@ def compose_digest(due_today_titles: list = None, spare_energy_titles: list = No
             DIGEST_PROMPT.format(
                 state=_state_block(),
                 today=now.strftime("%A, %B %-d"),
-                due_today_list=", ".join(due_today_titles) or "(none)",
+                due_today_list="; ".join(due_today_titles) or "(none)",
                 spare_energy_list=", ".join(spare_energy_titles) or "(none)",
                 n_open=n_open,
             ),
@@ -960,4 +1237,45 @@ def compose_digest(due_today_titles: list = None, spare_energy_titles: list = No
     # sanity: an empty or absurdly long reply falls back rather than shipping
     if not text or len(text) > 1500:
         return None
-    return text
+    return _tidy_digest(text, now)
+
+
+_DIGEST_HEADER_RE = re.compile(
+    r"^\s*(good\s+)?morning[^\n]*|^\s*(?:your\s+)?morning(?:'s)?\s+digest[^\n]*|"
+    r"^\s*(mon|tues|wednes|thurs|fri|satur|sun)day[^\n]*",
+    re.IGNORECASE,
+)
+
+
+def _tidy_digest(text: str, now: datetime) -> str:
+    """Two deterministic cleanups on the model's digest prose.
+
+    1. Strip a leading header it wrote itself. scheduler.py already prefixes
+       "Morning! It's Saturday, July 25." — the model then opened with its own
+       "Morning digest for Saturday, July 25", so the date shipped twice in a
+       row on 3 of 5 jarvis digests and 4 of 6 of penny's. The prompt now asks
+       it not to; this makes it true regardless.
+    2. Fix all-lowercase drift. Penny's 2026-07-23 digest arrived entirely in
+       lowercase ("order more nespresso (due 8am)") — harmless but it reads
+       like a different, sloppier assistant. Only touched when there is no
+       uppercase at all, so deliberate styling within a normal digest is safe.
+    """
+    lines = text.strip().splitlines()
+    # A header is short by nature. The length ceiling is what keeps this from
+    # eating a real first sentence that merely starts with a day name or the
+    # word "morning" — content lines carry a plan, headers carry a date.
+    while len(lines) > 1:
+        first = lines[0].strip()
+        if not first:
+            lines.pop(0)
+            continue
+        if len(first) <= 60 and _DIGEST_HEADER_RE.match(first) and any(l.strip() for l in lines[1:]):
+            lines.pop(0)
+            continue
+        break
+    out = "\n".join(lines).strip() or text.strip()
+    if not any(c.isupper() for c in out):
+        out = "\n".join(
+            (l[:1].upper() + l[1:]) if l[:1].isalpha() else l for l in out.splitlines()
+        )
+    return out

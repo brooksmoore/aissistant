@@ -455,6 +455,74 @@ def replace_item_reminders(item_id, remind_at):
             con.execute("INSERT INTO reminders (item_id, fire_at) VALUES (?,?)", (item_id, t))
 
 
+def roll_forward_recurring(now: datetime) -> list:
+    """A recurring item's next occurrence is only ever created by check-off
+    (see complete_item). Miss one and the series silently STOPS: that
+    occurrence rots as a permanently-overdue row and no new one is ever born.
+
+    Live case (jarvis, 2026-07-23): the daily pushup item was never completed
+    that night, so #98 sat open and 2 days overdue while the 07-24 and 07-25
+    digests both described it as *today's* pushups — the count, the reminder
+    time and the date all belonged to a day that was gone.
+
+    A cycle is a cycle: once an occurrence's whole day is behind us, roll it to
+    the next one rather than leaving a stale row to be re-narrated forever. A
+    missed habit day is not a task you still owe — it's a day that passed.
+    Deliberately guilt-free: no "you missed 2 days" record, matching the
+    never-shame-overdue rule the digests already follow.
+
+    Only touches items whose due_at is before the start of TODAY — an
+    occurrence still due later today is genuinely live and is left alone.
+    Rolls in whole cycles (so a weekly item stays on its weekday) and honours
+    recurrence_until by ending the series instead of rolling past it.
+
+    Returns a list of (item_id, old_due, new_due_or_None) for logging."""
+    rolled = []
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    with _c() as con:
+        rows = con.execute(
+            "SELECT * FROM items WHERE status='open' AND recurrence IS NOT NULL"
+            " AND due_at IS NOT NULL"
+        ).fetchall()
+    for it in rows:
+        due = parse_dt(it["due_at"])
+        if not due or due >= today_start:
+            continue  # today's (or a future) occurrence — still live, leave it
+        until = parse_dt(it["recurrence_until"]) if "recurrence_until" in it.keys() else None
+        new_due = due
+        while new_due < today_start:
+            new_due = _advance_date(new_due, it["recurrence"])
+        if until and new_due.date() > until.date():
+            # the series is over — retire the stragger rather than rolling it
+            # past the end date the owner asked for
+            update_item(it["id"], status="dropped", next_remind_at=None)
+            delete_unfired_reminders(it["id"])
+            rolled.append((it["id"], it["due_at"], None))
+            continue
+        lead = it["remind_lead_seconds"] or 0
+        remind = new_due - timedelta(seconds=lead)
+        # A lead that lands the reminder earlier today than "now" would be an
+        # instantly-overdue ping (the exact shape of the 6-nudge storm on
+        # 2026-07-24) — fall back to pinging at the due moment itself, which
+        # is always still ahead of us here.
+        if remind <= now:
+            remind = new_due
+        fields = {
+            "due_at": new_due.isoformat(timespec="seconds"),
+            "next_remind_at": None,
+            "remind_count": 0,
+        }
+        if it["progress_target"] is not None:
+            # a new day is a clean slate, never a carried count (same rule
+            # add_item applies to a completion-driven respawn)
+            with _c() as con:
+                con.execute("UPDATE items SET progress_current=0 WHERE id=?", (it["id"],))
+        update_item(it["id"], **fields)
+        replace_item_reminders(it["id"], remind.isoformat(timespec="seconds"))
+        rolled.append((it["id"], it["due_at"], fields["due_at"]))
+    return rolled
+
+
 def overdue_stale_items(hours: int) -> list:
     """Open items whose due_at passed more than `hours` ago — these have
     fallen out of the nag chain (see NAG_WINDOW_HOURS in scheduler.py) and
