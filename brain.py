@@ -219,8 +219,16 @@ answer from each item's own `due` date in the state below; never conclude an ite
 day just because a previous digest message didn't mention it.
 
 Item [#] and fact [f#] IDs below are real — use them for complete_item / update_item / replaces_fact_id. Items \
-you captured earlier this conversation appear below: your own work, not duplicates. "What's on my list" → \
-summarize from state (no tool needed), leading with today.
+you captured earlier this conversation appear below: your own work, not duplicates.
+
+ANSWERING "WHAT'S LEFT": the state block opens with three code-computed buckets (DUE TODAY OR OVERDUE / LATER / \
+NO DATE). They are authoritative and already filtered. "What's left today", "what else do I have to do", "what's \
+on tap" → read out EVERY item in the DUE TODAY OR OVERDUE bucket, no tool call needed, shortest useful phrasing \
+per item, and say the count so {_S} can tell nothing was trimmed. Never answer from what you remember discussing, \
+never re-derive "is this today" from the raw due dates further down, and never return a subset — naming one item \
+when six are due (live failure, 2026-07-25) is worse than a long list, because it makes the list untrustworthy. If \
+{_S} just told you {_S} finished something in the same message, check it off FIRST, then answer, so the item {_S} \
+just closed doesn't appear in what's left.
 """
 
 
@@ -637,6 +645,7 @@ def _state_block() -> str:
         items_txt = "\n".join(lines)
     else:
         items_txt = "(list is empty)"
+    agenda_txt = _agenda_text(memory.open_items())
     cal_txt = gcal.upcoming_text() if gcal.enabled() else "(calendar not connected yet)"
     prefs_txt = (
         f"emoji_level={scheduler.pref('emoji_level', 'minimal')}, "
@@ -657,10 +666,69 @@ def _state_block() -> str:
     return (
         f"\n--- CURRENT STATE ---\n"
         f"What you know about {_O}:\n{facts_txt}\n\n"
-        f"{_Pcap} open items:\n{items_txt}\n\n"
+        f"{agenda_txt}\n"
+        f"{_Pcap} open items (full detail):\n{items_txt}\n\n"
         f"{_Pcap} calendar (next 7 days):\n{cal_txt}\n\n"
         f"Your current behavior settings: {prefs_txt}\n"
     )
+
+
+def _agenda_text(items: list) -> str:
+    """"What's left today" answered by CODE, not by model recall.
+
+    Live failure (jarvis, 2026-07-25 5:22pm): asked "what else is on tap for me
+    today?" the reply was "Call Clint at 5:45pm." — one item out of SIX that
+    were genuinely open and dated today or earlier (groceries, the AIssistant
+    public post, the Workday request, Kyra's dad, Clint, pushups). He'd also
+    just said he'd responded to Brian, which was never checked off, so it was
+    missing from both the answer AND the completion.
+
+    The cause is the same one the smart digest already hit and fixed: the open-
+    items list below is flat, priority-sorted, and carries raw ISO timestamps,
+    so answering a "today" question means scanning 30 lines and doing date
+    comparisons in your head. That re-derivation is what scheduler.digest_buckets
+    exists to prevent — this reuses the exact same function, so the digest and a
+    typed "what's left today" can never give different answers.
+
+    Stable within a day (no clock time in it), so the state block still
+    cache-hits across turns."""
+    now = datetime.now(TZ)
+    due_today, _spare = scheduler.digest_buckets(items, now)
+
+    def _one(i):
+        d = memory.parse_dt(i["due_at"])
+        if not d:
+            # in this bucket with no due date means a ping lands today (see
+            # scheduler.digest_buckets) — name that time, it's the item's when
+            pings = [p for p in (memory.parse_dt(t) for t in memory.pending_reminder_times(i["id"])) if p]
+            today_pings = sorted(p for p in pings if p.date() == now.date())
+            when = f" (ping {today_pings[0].strftime('%-I:%M %p')} today)" if today_pings else ""
+            return f"#{i['id']} {i['title']}{when}"
+        when = d.strftime("%-I:%M %p")
+        if d.date() < now.date():
+            return f"#{i['id']} {i['title']} (OVERDUE — was due {d.strftime('%b %-d')} at {when})"
+        return f"#{i['id']} {i['title']} ({when})"
+
+    later, undated = [], []
+    for i in items:
+        if i in due_today:
+            continue
+        (later if i["due_at"] else undated).append(i)
+    lines = [
+        f"TODAY IS {now.strftime('%A %Y-%m-%d')}. The three buckets below are computed by code and "
+        f"are AUTHORITATIVE — when {_S} asks what's left/due/on tap today, or what {_S} still has to "
+        f"do, list EVERY item in the first bucket and nothing else. Never answer that question from "
+        f"memory of this conversation, and never give a subset: a short answer that omits real items "
+        f"is the single worst failure this assistant has, worse than a long one.",
+        f"  DUE TODAY OR OVERDUE ({len(due_today)}): "
+        + ("; ".join(_one(i) for i in due_today) or "(none)"),
+        f"  LATER (dated, not today) ({len(later)}): "
+        + ("; ".join(f"#{i['id']} {i['title']} ({(memory.parse_dt(i['due_at']) or now).strftime('%a %b %-d')})"
+                     for i in later) or "(none)"),
+        f"  NO DATE ({len(undated)}): "
+        + ("; ".join(f"#{i['id']} {i['title']}" for i in undated) or "(none)"),
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _now_line() -> str:
@@ -893,15 +961,36 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         thrown away and replaced with the deterministic confirmation. Only
         applies inside a guard retry, where the premise is that the owner never
         corrected anything, so there is nothing to legitimately apologize for."""
-        if not work_done:
-            return retry_text
-        if retry_text and not SELF_CORRECTION_RE.search(retry_text):
+        dirty = bool(retry_text) and (SELF_CORRECTION_RE.search(retry_text)
+                                      or _detects_leak(retry_text))
+        if not dirty:
             return retry_text  # the retry answered cleanly — leave it alone
-        replacement = _confirmation_from(captured, did)
-        if replacement:
-            log.info("scrubbed self-correcting prose from a successful retry: %r", retry_text[:200])
-            return replacement
-        return retry_text
+        if work_done:
+            replacement = _confirmation_from(captured, did)
+            if replacement:
+                log.info("scrubbed self-correcting prose from a successful retry: %r", retry_text[:200])
+                return replacement
+            return retry_text
+        # Nothing was done AND the reply is apologising or narrating the check:
+        # there is no deterministic confirmation to fall back on, so ask once
+        # more for a plain answer. This path is rare and worth the round-trip —
+        # what it replaces is a reply that reads like a debug log.
+        log.warning("retry reply was meta/apologetic with no work behind it; re-asking plainly: %r",
+                    retry_text[:300])
+        clean, _w = _corrective(
+            f"(automated system check — {_S} cannot see this and cannot see your last reply. That "
+            f"reply talked about the check, about your own earlier turn, or referred to {_O} in the "
+            f"third person. None of that belongs in a message addressed TO {_O}. Send the reply you "
+            f"should have sent: answer {_P} last message directly, in second person (\"you\"), with "
+            "no reference to any check, no discussion of your previous replies, and no apology for "
+            f"anything {_S} did not raise. If {_S} asked what's left, read out the DUE TODAY OR "
+            "OVERDUE bucket in full. If something genuinely needs doing, do it now and confirm it.)"
+        )
+        if clean and not (SELF_CORRECTION_RE.search(clean) or _detects_leak(clean)):
+            return clean
+        return _confirmation_from(captured, did) or (
+            "Let me start clean — ask me again and I'll give you a straight answer."
+        )
 
     # Empty-promise guard: the model stated a change ("turned off", "saved
     # that", ...) but made zero tool calls this turn. Give it exactly one
@@ -922,19 +1011,37 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     if text and not captured and not did and (claims_change(text) or llm_claims_change(text)):
         n = memory.bump_counter("incident_claims")
         log.warning("empty-promise guard tripped (incident #%d today): %r", n, text[:600])
+        # The "nothing actually needed fixing" escape hatch was added on
+        # 2026-07-16 for a real case (a diagnostic question whose accurate
+        # answer tripped the guard) and then got abused on 2026-07-25: given
+        # "Responded to Brian, you can complete that. Whats left today?" the
+        # model took the escape hatch, concluded he'd only asked a question,
+        # completed nothing, and the Brian item is still open. Whether the
+        # message contains an actual ask is something CODE can tell, so the
+        # hatch is now only offered when there genuinely isn't one.
+        asked_for_action = bool(CAPTURE_INTENT_RE.search(user_text))
+        outcomes = (
+            "Two honest outcomes are possible, pick whichever is true: (1) make the real "
+            "tool call(s) now and confirm what changed; (2) you genuinely cannot do it — "
+            f"say so plainly. {_Scap} DID ask you to record, change, or check something off "
+            "in this message, so 'nothing needed doing' is NOT available here: do not talk "
+            "about the request instead of acting on it."
+            if asked_for_action else
+            "Three honest outcomes are possible, pick whichever is true: (1) something "
+            "genuinely needs doing — make the real tool call(s) now and confirm; (2) you "
+            "can't do it — say so plainly; (3) nothing actually needed fixing — "
+            f"{_S} asked a question, not for a change, and your wording just sounded like a "
+            "claim. In case (3), do NOT invent a tool call to have something to point to — "
+            f"just answer {_P} question accurately with no action at all."
+        )
         text, work_done = _corrective(
             f"(automated system check, not a message from {_O} — {_S} has not seen your "
             "last reply yet and did not correct you: your last reply reads like it's "
             f"claiming a change happened, but no tool call succeeded this turn. Look at "
-            f"what {_S} actually asked. Three honest outcomes are possible, pick whichever "
-            "is true: (1) something genuinely needs doing — make the real tool call(s) "
-            "now and confirm; (2) you can't do it — say so plainly; (3) nothing actually "
-            f"needed fixing — {_S} asked a question, not for a change, and your wording "
-            "just sounded like a claim. In case (3), do NOT invent a tool call to have "
-            f"something to point to — just answer {_P} question accurately with no action "
-            "at all. Whichever it is, do not say 'you're right', don't reference this "
-            f"check, don't apologize for a mistake {_S} hasn't actually raised — reply as "
-            f"your first and only response to {_O}.)"
+            f"what {_S} actually asked. " + outcomes + " Whichever it is, do not say "
+            f"'you're right', don't reference this check, don't apologize for a mistake {_S} "
+            f"hasn't actually raised, never refer to {_O} in the third person — reply as "
+            f"your first and only response to {_O}, addressed to {_O} as \"you\".)"
         )
         text = _scrub_self_correction(text, work_done)
         # Real incident (2026-07-18, jarvis): the corrective round-trip itself
@@ -1074,6 +1181,35 @@ SELF_CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Talking ABOUT the automated check, or about its own previous turn, instead of
+# just answering. Live failure (jarvis, 2026-07-25 5:11pm) — the whole reply he
+# received, verbatim: "Looking back at his actual request: 'Whats left today?'
+# — that was a question about what's on his list for today, not a request for
+# any change. I answered it accurately from the state... No tool call was
+# needed; I should have just answered the question plainly... I'll reply
+# correctly if he messages again."
+#
+# That is the model's reasoning about the injected system check, written in the
+# third person, delivered as a reply. The corrective note has to be appended as
+# a `user` turn — that's the only channel available mid-turn — so the model can
+# mistake it for a conversation to join. Caught on the machinery vocabulary and
+# on third-person references to the owner, which never belong in a message
+# addressed TO the owner. Built per-instance from the owner pronouns.
+_LEAK_PATTERNS = (
+    r"system check", r"\bautomated\b", r"no tool call", r"tool call was",
+    rf"{_P} actual (?:request|message|ask)",
+    rf"\bif {_S} (?:messages|asks|writes|says)\b",
+    rf"\b{_S} (?:actually |just )?(?:asked|said|messaged|wants|meant)\b",
+    r"my (?:last|previous) (?:reply|response|turn)", r"i'?ll reply", r"looking back at",
+)
+_LEAK_RE = re.compile("|".join(_LEAK_PATTERNS), re.IGNORECASE)
+
+
+def _detects_leak(text: str) -> bool:
+    """True if a reply is narrating the guard machinery rather than answering."""
+    return bool(_LEAK_RE.search(text))
+
+
 # A promise that a ping now exists. Future tense on purpose — "I'll remind you
 # tonight" is exactly the shape of the unbacked promise that shipped live.
 PROMISED_REMINDER_RE = re.compile(
@@ -1104,7 +1240,14 @@ CAPTURE_INTENT_RE = re.compile(
     r"remind me|don'?t let me forget|add (?:a |an |to )?|put .{0,20}on (?:my|the) list|"
     r"save (?:this|that|it)|check (?:that |this |it )?off|cross (?:that |this |it )?off|"
     r"mark .{0,30}(?:done|complete)|i (?:already |just )?(?:did|finished|completed|returned|sent|called)|"
-    r"complete the|i'?ve (?:done|finished)|keep reminding me|continue to remind me",
+    r"complete the|i'?ve (?:done|finished)|keep reminding me|continue to remind me|"
+    # How he actually phrases a check-off, from the live transcripts: "you can
+    # complete that for the day", "so you can complete that", "you can check
+    # out Revolve, check off...". Missing these is what let the guard decide
+    # "Responded to Brian, you can complete that. Whats left today?" contained
+    # no ask at all, take the escape hatch, and lose the completion.
+    r"you can (?:complete|check|mark|cross|close|drop)|"
+    r"\b(?:done with|finished with)\b|^(?:done|completed|finished)\b",
     re.IGNORECASE,
 )
 

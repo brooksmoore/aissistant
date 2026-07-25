@@ -736,5 +736,215 @@ class TestStaleSweep(unittest.TestCase):
         self.assertEqual(len(ctx.bot.sent), 1)
 
 
+class TestTodaysAgendaIsPrecomputed(unittest.TestCase):
+    """Real failure (jarvis, 2026-07-25 5:22pm): "What else is on tap for me
+    today?" got the answer "Call Clint at 5:45pm." — ONE item out of six that
+    were genuinely open and dated today or earlier. The open-items list in the
+    state block is flat, priority-sorted and carries raw ISO timestamps, so
+    answering a "today" question meant scanning 30 lines and comparing dates by
+    eye. Same re-derivation failure the smart digest already hit; same fix."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        self.brain = brain
+        self.now = datetime.now(config.TZ)
+
+    def test_every_due_or_overdue_item_is_listed_with_a_count(self):
+        memory.add_item("Get groceries", due_at=iso(self.now - timedelta(days=2)))
+        memory.add_item("Use Fable to get AIssistant public", due_at=iso(self.now - timedelta(days=1)))
+        memory.add_item("Call Clint", due_at=iso(self.now.replace(hour=17, minute=45)))
+        memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
+        memory.add_item("Doctor appointment", due_at=iso(self.now + timedelta(days=2)))
+
+        agenda = self.brain._agenda_text(memory.open_items())
+        due_line = [l for l in agenda.splitlines() if "DUE TODAY OR OVERDUE" in l][0]
+        self.assertIn("(4)", due_line, "the count must let him see nothing was trimmed")
+        for title in ("Get groceries", "Use Fable", "Call Clint", "Pushups"):
+            with self.subTest(title=title):
+                self.assertIn(title, due_line)
+        self.assertNotIn("Doctor appointment", due_line)
+
+    def test_overdue_items_are_marked_overdue_with_their_real_date(self):
+        past = self.now - timedelta(days=2)
+        memory.add_item("Get groceries", due_at=iso(past))
+        agenda = self.brain._agenda_text(memory.open_items())
+        self.assertIn("OVERDUE", agenda)
+        self.assertIn(past.strftime("%b %-d"), agenda)
+
+    def test_undated_backlog_is_kept_separate_from_today(self):
+        memory.add_item("Run the graph article by coworker")
+        agenda = self.brain._agenda_text(memory.open_items())
+        due_line = [l for l in agenda.splitlines() if "DUE TODAY OR OVERDUE" in l][0]
+        no_date_line = [l for l in agenda.splitlines() if "NO DATE" in l][0]
+        self.assertNotIn("graph article", due_line)
+        self.assertIn("graph article", no_date_line)
+
+    def test_the_agenda_is_stable_within_a_day_so_the_state_block_still_caches(self):
+        memory.add_item("Call Clint", due_at=iso(self.now.replace(hour=17, minute=45)))
+        self.assertEqual(self.brain._agenda_text(memory.open_items()),
+                         self.brain._agenda_text(memory.open_items()))
+        self.assertNotIn("Now:", self.brain._agenda_text(memory.open_items()))
+
+
+class TestPingTodayCountsAsToday(unittest.TestCase):
+    """Real hole (jarvis, 2026-07-25 4:21pm): "Remind me to respond to Brian at
+    7pm tonight" saved a 7pm reminder and NO due_at. The ping would have fired
+    correctly, but the item was invisible to every "what's due today"
+    calculation — including the morning digest — and would have been offered
+    under "if there's spare energy" instead. Note the deliberate asymmetry with
+    a night-before ping for a later event."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        import scheduler
+        self.brain = brain
+        self.scheduler = scheduler
+        self.now = datetime.now(config.TZ)
+
+    def test_undated_item_pinging_today_is_a_today_item(self):
+        memory.add_item("Respond to Brian", remind_at=iso(self.now.replace(hour=19, minute=0)))
+        due, spare = self.scheduler.digest_buckets(memory.open_items(), self.now)
+        self.assertEqual([i["title"] for i in due], ["Respond to Brian"])
+        self.assertEqual(spare, [], "something with a ping tonight is not spare-energy backlog")
+
+    def test_its_ping_time_is_named_in_the_agenda(self):
+        memory.add_item("Respond to Brian", remind_at=iso(self.now.replace(hour=19, minute=0)))
+        self.assertIn("ping 7:00 PM today", self.brain._agenda_text(memory.open_items()))
+
+    def test_a_night_before_ping_for_a_later_event_is_not_today(self):
+        """Polo Club, live: pings 9pm tonight, due 10:30am tomorrow. The event
+        is tomorrow's — it must not be listed among today's work."""
+        tomorrow = (self.now + timedelta(days=1)).replace(hour=10, minute=30)
+        memory.add_item("Go to Polo Club for 10:30am appointment",
+                        due_at=iso(tomorrow), remind_at=iso(self.now.replace(hour=21, minute=0)))
+        due, _spare = self.scheduler.digest_buckets(memory.open_items(), self.now)
+        self.assertEqual(due, [])
+
+    def test_undated_item_pinging_a_future_day_is_neither_today_nor_spare_energy(self):
+        memory.add_item("Check on the refund", remind_at=iso(self.now + timedelta(days=4)))
+        due, spare = self.scheduler.digest_buckets(memory.open_items(), self.now)
+        self.assertEqual(due, [])
+        self.assertEqual(spare, [], "a scheduled ping means scheduled, not flexible backlog")
+
+    def test_genuinely_undated_backlog_still_reaches_spare_energy(self):
+        memory.add_item("Run the graph article by coworker")
+        _due, spare = self.scheduler.digest_buckets(memory.open_items(), self.now)
+        self.assertEqual([i["title"] for i in spare], ["Run the graph article by coworker"])
+
+
+class TestGuardNeverLeaksItsOwnMachinery(unittest.TestCase):
+    """Real failure (jarvis, 2026-07-25 5:11pm) — the entire reply he received:
+    "Looking back at his actual request: 'Whats left today?' — that was a
+    question about what's on his list for today, not a request for any change.
+    I answered it accurately from the state... No tool call was needed; I
+    should have just answered the question plainly... I'll reply correctly if he
+    messages again." That is the model's reasoning about the injected system
+    check, in the third person, delivered as a reply. The same turn also lost
+    the "Responded to Brian, you can complete that" check-off entirely."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        self.brain = brain
+        memory.set_setting("owner_chat_id", "12345")
+
+    def _respond(self, script, user_text):
+        orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
+        orig_missed = self.brain._missed_captures
+        self.brain.client.messages.create = script
+        self.brain.llm_claims_change = lambda text: False
+        self.brain._missed_captures = lambda user_text, captured: []
+        try:
+            return self.brain.respond(user_text)
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_judge
+            self.brain._missed_captures = orig_missed
+
+    LEAK = ("Looking back at his actual request: \"Whats left today?\" — that was a question about "
+            "what's on his list, not a request for any change. No tool call was needed. I'll reply "
+            "correctly if he messages again.")
+
+    def test_the_verbatim_live_leak_is_detected(self):
+        self.assertTrue(self.brain._detects_leak(self.LEAK))
+
+    def test_ordinary_replies_are_not_flagged_as_leaks(self):
+        for text in ["Call Clint at 5:45pm is what's left today.",
+                     "Done — groceries checked off.",
+                     "Brian said he'd get back to you tomorrow.",
+                     "You have six things left today: groceries, the Workday request, and four more."]:
+            with self.subTest(text=text):
+                self.assertFalse(self.brain._detects_leak(text))
+
+    def test_a_leaked_reply_is_replaced_by_a_clean_re_answer(self):
+        memory.add_item("Call Clint", due_at=iso(datetime.now(config.TZ).replace(hour=17, minute=45)))
+        script = _Script(
+            text_resp("Checked off the Brian item — here's what's left today."),  # claim, no tools
+            text_resp(self.LEAK),                                             # leak, still no tools
+            text_resp("Call Clint at 5:45pm is the only thing left today."),  # clean
+        )
+        reply = self._respond(script, "Responded to Brian, you can complete that. Whats left today?")
+        self.assertEqual(script.calls, 3)
+        self.assertEqual(reply, "Call Clint at 5:45pm is the only thing left today.")
+        self.assertNotIn("he messages", reply)
+
+    def test_a_second_leak_falls_back_instead_of_shipping_it(self):
+        script = _Script(
+            text_resp("Checked off the Brian item."),
+            text_resp(self.LEAK),
+            text_resp("As I said, no tool call was needed for his question."),
+        )
+        reply = self._respond(script, "Responded to Brian, you can complete that. Whats left today?")
+        self.assertNotIn("his question", reply)
+        self.assertNotIn("no tool call", reply)
+
+
+class TestGuardDoesNotOfferAnEscapeHatchWhenActionWasAsked(unittest.TestCase):
+    """The "nothing actually needed fixing" outcome was added 2026-07-16 for a
+    real case (a diagnostic question whose accurate answer tripped the guard).
+    On 2026-07-25 it got abused: given "Responded to Brian, you can complete
+    that. Whats left today?" the model took the hatch, decided he'd only asked
+    a question, completed nothing — and that item was still open hours later.
+    Whether the message contains a real ask is something code can decide."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        self.brain = brain
+        memory.set_setting("owner_chat_id", "12345")
+
+    def _corrective_note_for(self, user_text):
+        notes = []
+        orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
+
+        def capture(**kw):
+            for m in kw["messages"]:
+                if m["role"] == "user" and isinstance(m["content"], list):
+                    for block in m["content"]:
+                        if block.get("type") == "text" and "automated system check" in block["text"]:
+                            notes.append(block["text"])
+            return text_resp("Fine.")
+
+        self.brain.client.messages.create = capture
+        self.brain.llm_claims_change = lambda text: True
+        try:
+            self.brain.respond(user_text)
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_judge
+        return notes[0] if notes else ""
+
+    def test_hatch_is_withheld_when_he_asked_for_a_completion(self):
+        note = self._corrective_note_for("Responded to Brian, you can complete that. Whats left today?")
+        self.assertIn("is NOT available here", note)
+        self.assertIn("DID ask you to record", note)
+
+    def test_hatch_is_offered_for_a_plain_diagnostic_question(self):
+        note = self._corrective_note_for("why did you nudge me a minute after the initial reminder?")
+        self.assertIn("nothing actually needed fixing", note)
+
+
 if __name__ == "__main__":
     unittest.main()

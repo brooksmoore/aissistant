@@ -347,7 +347,25 @@ def digest_buckets(items: list, now: datetime) -> tuple:
     a Python version and a re-derived English-prose version that can drift
     out of sync (confirmed: the spare-energy fix here once only touched this
     function, leaving the smart prompt's copy of the same rule stale)."""
-    due_today = [i for i in items if (d := memory.parse_dt(i["due_at"])) and d.date() <= now.date()]
+    def _pings(i):
+        return [p for p in (memory.parse_dt(t) for t in memory.pending_reminder_times(i["id"])) if p]
+
+    def _is_today(i) -> bool:
+        d = memory.parse_dt(i["due_at"])
+        if d:
+            return d.date() <= now.date()
+        # An item with NO due date but a ping scheduled for today IS a today
+        # item — the ping is the only date it has. Live hole (jarvis,
+        # 2026-07-25): "remind me to respond to Brian at 7pm tonight" saved a
+        # 7pm reminder and no due_at, so the item pinged correctly but was
+        # invisible to every "what's due today" calculation, and would have
+        # been offered under "if there's spare energy" instead. Note the
+        # asymmetry with a night-before ping for a LATER event (Polo Club:
+        # pings 9pm tonight, due 10:30am tomorrow) — that has a due date, so
+        # the branch above already correctly keeps it out of today.
+        return any(p.date() == now.date() for p in _pings(i))
+
+    due_today = [i for i in items if _is_today(i)]
     # "spare energy" is for flexible, undated backlog work she could get ahead
     # on. Anything with a specific future due_at — a dinner reservation, trivia
     # night, a Sunday-only recurring email, a reminder tied to a day later this
@@ -365,7 +383,10 @@ def digest_buckets(items: list, now: datetime) -> tuple:
     # section entirely. Rotating by day-of-year gives every undated item a turn
     # and costs nothing; the weekly tidy-up (maintenance.py) is still what
     # eventually asks whether to keep or drop them.
-    pool = [i for i in items if i not in due_today and not i["due_at"]]
+    # ...and a pending ping on a future day disqualifies an item from
+    # spare-energy for exactly the same reason a future due_at does: it's
+    # scheduled, not flexible backlog she could pull forward.
+    pool = [i for i in items if i not in due_today and not i["due_at"] and not _pings(i)]
     if len(pool) > SPARE_ENERGY_SHOWN:
         offset = (now.timetuple().tm_yday * SPARE_ENERGY_SHOWN) % len(pool)
         pool = (pool + pool)[offset:offset + SPARE_ENERGY_SHOWN]
