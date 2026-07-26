@@ -1,152 +1,108 @@
-# aissistant — shippable personal AI assistants
+# aissistant
 
-One codebase, many independent assistants. Each **instance** (e.g. `penny`, `jarvis`) has its
-own Telegram bot, Anthropic API key, database/memories, Google account, backups, and log under
-`instances/<name>/` — completely separate brains that all improve together when the code improves.
+A personal AI assistant you talk to like a person, that never loses what you said.
 
-**Add a new instance in ~5 minutes:** create a bot via @BotFather + a fresh Anthropic key, fill
-them into `instances/<name>/.env` (copy `.env.example`), then `bash install_autostart.sh <name>`
-and text the bot your pairing code. Google (calendar/inbox) per instance:
-`AISSISTANT_INSTANCE=<name> ./venv/bin/python setup_google.py` (README step 6 for the one-time
-Google Cloud part, done in THAT person's Google account). Owner report per instance:
-`AISSISTANT_INSTANCE=<name> ./venv/bin/python report.py 7`. Tests: `bash run_tests.sh [--live]`.
+I wanted an assistant that actually held the things I said out loud: errands, appointments,
+"remind me the night before," a running pushup count. Existing to-do apps require you to stop
+and type into forms, so they don't get used. I built one on Telegram with a Claude brain.
+Two people have used it as their daily driver since July 2026. It costs a few cents per day
+per person to run, and it is covered by 202 unit tests plus a 35-check suite that runs
+against the live model.
 
----
+<!-- screenshot slot: docs/screenshot_chat.png — a real conversation, personal content scrubbed -->
 
-# Penny — the original instance 💛
+The most interesting part of this repo is not the feature list. It is
+**[ENGINEERING_LOG.md](ENGINEERING_LOG.md)**: twelve production incidents, each with the
+symptom, the root cause found in the actual database and logs, the fix, and the regression
+test that now guards it. A non-technical summary lives in **[CASE_STUDY.md](CASE_STUDY.md)**.
 
-A Telegram bot with a Claude brain that lives on Brooks's Mac. It captures everything she
-says (via iPhone mic dictation), holds a prioritized master list with satisfying ✓ check-off
-buttons, nags intelligently until things are done, sends morning/evening digests, edits her
-Google Calendar, and watches her personal Gmail inbox for things that need her.
+## What it does
 
-**Total setup time: ~15 minutes for the core, +20 minutes for the Google (calendar/email) part.**
-The Google part is optional and can be done any time later — everything else works without it.
+- **Capture by voice.** Send a rambling voice memo; every task, plan, and fact in it gets
+  saved individually. Transcription runs locally (faster-whisper), so audio never leaves
+  the machine.
+- **Remind until done.** Items have scheduled reminders ("night before and day of"),
+  escalating nags once overdue, check-off buttons, snooze, mute, and a daily ping budget the
+  owner can change by just asking.
+- **Remember.** Facts about the owner's life live in SQLite and survive any restart. A
+  correction replaces the old fact permanently; the bot is forbidden from arguing.
+- **Digests.** A model-written morning plan (sequenced by time, flags real conflicts) and an
+  optional evening review. Every behavior is a chat-adjustable preference with a real
+  mechanism behind it.
+- **Optional Google.** Calendar read/write and read-only Gmail triage that pings only for
+  mail a real person is waiting on.
+- **Multi-instance.** One codebase, N independent installs under `instances/<name>/`, each
+  with its own bot, API key, database, and backups. Zero shared state by construction.
 
----
+## How it works
 
-## Step 1 — She installs Telegram (2 min, her phone)
-
-App Store → **Telegram** → sign up with her phone number. Free.
-
-## Step 2 — Create her bot (3 min, either phone or Mac)
-
-1. In Telegram, search for **@BotFather** (blue checkmark) and open it.
-2. Send it: `/newbot`
-3. It asks for a display name → e.g. `Penny 💛`
-4. It asks for a username → something like `my_assistant_bot` (must end in `bot`, must be unused).
-5. BotFather replies with a **token** that looks like `7712345678:AAF...xyz`. **Copy it.**
-
-## Step 3 — Configure (3 min, the Mac)
-
-```bash
-cd ~/penny
-bash setup.sh          # installs everything into a private venv
-open -e .env           # opens the config file
+```mermaid
+flowchart LR
+    P[iPhone: Telegram voice or text<br/>Siri Shortcut / iOS companion] --> B[bot.py<br/>python-telegram-bot]
+    B --> BR[brain.py<br/>Claude Haiku tool loop<br/>+ empty-promise guard]
+    BR <--> DB[(SQLite<br/>items, facts, reminders,<br/>messages, spend)]
+    S[scheduler.py<br/>minute tick: reminders,<br/>nags, digests] --> DB
+    S --> B
+    BR <--> G[Google Calendar + Gmail<br/>optional, read-only mail]
+    H[heartbeat.py<br/>independent watchdog] -.watches.-> B
 ```
 
-In `.env` fill in:
-- `TELEGRAM_TOKEN` — from step 2
-- `ANTHROPIC_API_KEY` — your key from console.anthropic.com (the one in your ~/.zshrc works)
-- `PAIRING_CODE` — pick a secret word; she'll text it to the bot once to claim it (keeps strangers out)
-- `TIMEZONE` — set correctly if not Eastern (e.g. `America/Chicago`, `America/Los_Angeles`)
-- Optionally rename `ASSISTANT_NAME` and adjust digest times.
+The model is deliberately small (Claude Haiku). The system around it is what makes it
+trustworthy: SQLite is the single source of truth, every claimed action is verified against
+real tool calls, all scheduling and budgeting is deterministic code, and the prompt is
+layered stable-to-volatile for caching. The design bet, which held: for a narrow domain,
+context engineering and verification beat model size.
 
-## Step 4 — First run + pairing (2 min)
+## Engineering notes
 
-```bash
-bash run.sh
-```
+**The empty-promise guard.** Early on, the model would occasionally say "saved!" when no
+tool call had run. Now every reply is checked deterministically: a claimed change with no
+successful tool call behind it triggers one corrective round-trip (make the real call, or
+walk the claim back honestly). Two layers catch claims: a conservative regex and a cheap
+model judge, both failing open so neither can block a reply. The guard's own retry is
+checked too (a second hollow claim gets replaced with an honest fallback), and claims are
+also checked by kind, so a turn that does three real things and fabricates a fourth is
+caught. Trips are counted in the database and surfaced in a report CLI: reliability is
+measured, not remembered.
 
-On her phone: search Telegram for the bot's username from step 2, tap **Start**, and text it
-the pairing code word. She gets a welcome message and she's live — she can start brain-dumping
-immediately. **Only her chat works from then on; everyone else is ignored.**
+**Cost engineering.** A cost review found two turns 11 seconds apart that each cost the
+full uncached price. Root cause one: a per-minute timestamp sat inside the cached prompt
+prefix, invalidating the cache every turn. Root cause two, found while verifying the fix
+against the real API: Haiku's minimum cacheable prompt is about 4,096 tokens, and this
+bot's prefix measured 3,716, so caching had never engaged at all. Restructuring the prompt
+(personality, then state, then a tiny volatile block) pushed the cacheable prefix to 5,051
+tokens, verified live: written to cache on turn one, read back on turn two, about 350
+tokens billed fresh. A two-tier budget breaker degrades to cheaper behavior rather than
+dropping service, and reminders, buttons, and digests never cost API calls at all.
 
-## Step 5 — Make it permanent (1 min)
+**Reliability.** On July 14 both bots went silently unresponsive for six hours: processes
+alive, schedulers ticking, but the Telegram long-poll wedged in a network-error loop, so
+nothing crashed and nothing alerted. The fix is `heartbeat.py`, an independent watchdog
+process that checks each bot for a live PID, recent log activity, and that exact
+stuck-poller signature, and alerts through macOS notifications rather than through the
+channel that might be broken. The same discipline runs through the data layer: completing a
+recurring item and spawning its next occurrence is one atomic transaction, tool results are
+structured values instead of sniffed strings, and past-dated reminders are rejected at the
+tool boundary because the model once saved "remind me in an hour" three hours in the past.
 
-Ctrl+C the foreground run, then:
+**Testing.** 202 unit tests run in about three seconds with zero API cost (model calls are
+mocked or bypassed). A separate 35-check live suite runs real conversations against the
+real model on a scratch database, budget-capped per run, and replays past production
+incidents verbatim. Every bug found in production gets a regression test before the fix
+ships. The core prompt is drift-locked by a SHA-256 snapshot test, so no prompt change can
+land silently.
 
-```bash
-bash install_autostart.sh
-```
+## Running it
 
-Now it runs 24/7, survives reboots, restarts itself if it crashes.
-Logs: `tail -f ~/penny/penny.log`
+Setup takes about 15 minutes plus an optional 20 for Google:
+**[SETUP.md](SETUP.md)**. Tests: `bash setup.sh` once, then `bash run_tests.sh`
+(the free unit suite; `--live` adds the budget-capped live checks).
 
-## Step 6 — Google Calendar + Gmail (optional, ~20 min, one time)
+Privacy: everything lives in `instances/<name>/` on your own machine and is gitignored.
+Message text goes to Anthropic's API for the brain, message delivery goes through Telegram,
+and calendar/email access (if you enable it) goes to Google with read-only mail scope.
+Nothing else leaves the machine; voice notes are transcribed locally.
 
-This unlocks: bot edits her calendar, morning digest shows her day, inbox watcher pings her
-about emails that actually need her (and tracks Amazon deliveries). Skip it for now if you
-want — nothing else depends on it.
+## License
 
-1. Go to **console.cloud.google.com** — sign in with **her personal Gmail**.
-2. Top bar → project dropdown → **New Project** → name it `penny` → Create (then select it).
-3. Search bar: **"Google Calendar API"** → Enable. Then **"Gmail API"** → Enable.
-4. Search bar: **"OAuth consent screen"** → get started/configure:
-   - App name `Penny`, her email for both email fields, audience **External**, Create.
-   - Under **Audience** → Test users → **+ Add users** → add her Gmail address.
-5. Search bar: **"Credentials"** → **+ Create credentials** → **OAuth client ID** →
-   Application type **Desktop app** → Create → **Download JSON**.
-6. Rename the downloaded file to `google_credentials.json` and put it in `~/penny/`.
-7. Then:
-   ```bash
-   cd ~/penny
-   ./venv/bin/python setup_google.py
-   ```
-   A browser opens → **she** logs in and clicks Allow (it will warn "unverified app" — that's
-   expected for personal apps; click Continue). Then restart the bot:
-   ```bash
-   bash install_autostart.sh
-   ```
-
-Permissions used: calendar read/write, **Gmail read-only** (it can never send, delete, or
-modify her email).
-
----
-
-## What it costs
-
-- Telegram: free. Hosting: free (your Mac). Reminders/digests/buttons: free (no API calls).
-- Claude API — engineered down hard, three layers:
-  1. **Smart routing**: everyday turns (capture, check-off, "what's on my list") run on
-     Haiku; Sonnet fires only for decisions, planning, drafting, or photos.
-  2. **Prompt caching**: the big static prompt is cached (~90% off input tokens during a
-     back-and-forth conversation).
-  3. **Daily breaker**: past `DAILY_BUDGET_USD` (default $0.20) everything falls back to
-     Haiku — she never loses service, it just gets cheaper. Past `HARD_CAP_USD` (default
-     $0.25) API calls stop entirely until midnight; reminders, buttons, and plain-text
-     digests keep working free.
-  - Want all-Haiku (max savings, slightly weaker "help me decide" moments)? One line in
-    `.env`: `BRAIN_MODEL=claude-haiku-4-5-20251001`
-- Expected: **~$0.02–0.05/day** with normal use (measured ~quarter to half a cent per
-  message), worst case pinned near the $0.25 cap.
-  Check anytime by texting the bot `/stats` (shows today's estimated spend).
-- Heads-up: this shares your `ANTHROPIC_API_KEY` spend with the trading bots — give it its
-  own key if you want clean attribution.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Bot doesn't reply | `tail -20 penny.log` — usually a bad token or no internet |
-| "TELEGRAM_TOKEN is missing" | You edited `.env.example` instead of `.env` |
-| Reminders not arriving | Is the Mac awake? System Settings → prevent sleep (or Amphetamine app). Check she didn't mute the chat in Telegram |
-| Google stuff stopped working | Token expires after ~7 days while the OAuth app is in "testing" mode. Either re-run `setup_google.py`, or in Cloud Console → OAuth consent screen → **Publish app** (fine for personal use) which makes tokens permanent |
-| Want to reset the pairing | `sqlite3 penny.db "DELETE FROM settings WHERE key='owner_chat_id';"` then she texts the code again |
-| Wipe everything and start over | Stop the bot, delete `penny.db`, restart |
-
-## Where her data lives
-
-Everything is in `penny.db` (SQLite) in this folder — her list, memory of her life, chat
-history. Nothing goes anywhere except Anthropic's API (for the brain) and Google's API
-(calendar/email, if enabled). Back it up occasionally: `cp penny.db penny.backup.db`.
-
-## Files
-
-- `bot.py` — main app (Telegram wiring, buttons, jobs)
-- `brain.py` — Claude personality + tools (capture, complete, remember, calendar)
-- `memory.py` — SQLite storage
-- `scheduler.py` — escalating reminders + morning/evening digests
-- `gmail_watch.py` — inbox triage (Haiku classifies; only real stuff pings her)
-- `gcal.py` — Google Calendar read/write
-- `FOR_HER.md` — the one-pager to show her
+MIT. See [LICENSE](LICENSE).
