@@ -1037,3 +1037,280 @@ class TestHeartbeatCatchesDeadGoogleAuth(unittest.TestCase):
         self.assertIsNone(self._check_with_log([
             "2026-07-25 17:34:12,208 apscheduler INFO Job check_reminders executed successfully",
         ]))
+
+
+class TestMultiPartMessageGetsAFullAnswer(unittest.TestCase):
+    """Brooks: "Why doesn't Jarvis answer when I have multiple items in a
+    message and ask what else is on my list?"
+
+    Traced to the guard log. At 2026-07-25 5:22pm he sent "Planta dinner was
+    last night, you can complete it. What else is on tap for me today?" and the
+    model's FIRST draft was right on both counts — "Done — Planta Queen dinner.
+    Today (Saturday, July 25): Call Clint at 5:45pm is all that's left." — but
+    it made zero tool calls, so the empty-promise guard fired. The retry made
+    the real complete_item call and replied only "You're right — I need to
+    actually complete that item", and _scrub_self_correction replaced that
+    wholesale with the deterministic confirmation. Action correct, question
+    gone. Same shape at 5:11pm and 5:12pm: three turns in one afternoon.
+
+    Every guard was built to make an ACTION correct; none of them knew the
+    message might have a second half."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        self.brain = brain
+        memory.set_setting("owner_chat_id", "12345")
+
+    def _respond(self, script, user_text):
+        orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
+        orig_missed = self.brain._missed_captures
+        self.brain.client.messages.create = script
+        self.brain.llm_claims_change = lambda text: False
+        self.brain._missed_captures = lambda user_text, captured: []
+        try:
+            return self.brain.respond(user_text)
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_judge
+            self.brain._missed_captures = orig_missed
+
+    ASK = "Planta dinner was last night, you can complete it. What else is on tap for me today?"
+
+    def test_question_detection_on_the_real_message_shapes(self):
+        for text in [self.ASK,
+                     "Responded to Brian, you can complete that. Whats left today?",
+                     "Done on both, also completed the list of refer-able network\n\nWhat's left?",
+                     "What else do I have to do today?"]:
+            with self.subTest(text=text):
+                self.assertTrue(self.brain._asks_a_question(text))
+
+    def test_plain_capture_is_not_treated_as_a_question(self):
+        for text in ["Remind me to call grandma tomorrow at 6:30pm",
+                     "Did 25 pushups",
+                     "Lifting now, you can complete that for the day"]:
+            with self.subTest(text=text):
+                self.assertFalse(self.brain._asks_a_question(text))
+
+    def test_the_answer_survives_the_scrub(self):
+        """The exact 5:22pm turn: apologetic retry, real tool call, and an
+        answer that must not be thrown away with the apology."""
+        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        memory.add_item("Call Clint", due_at=iso(datetime.now(config.TZ).replace(hour=17, minute=45)))
+        script = _Script(
+            text_resp("Done — Planta Queen dinner.\n\nToday: Call Clint at 5:45pm is all that's left."),
+            _FakeResp(
+                _FakeToolBlock("complete_item", {"item_id": dinner}),
+                _FakeTextBlock("You're right — I need to actually complete that item. "
+                               "Today: Call Clint at 5:45pm is all that's left."),
+            ),
+        )
+        reply = self._respond(script, self.ASK)
+        self.assertEqual(memory.get_item(dinner)["status"], "done")
+        self.assertNotIn("You're right", reply)
+        self.assertIn("Call Clint", reply, "the answer to his question must survive")
+        self.assertIn("Planta Queen", reply, "and so must the confirmation")
+
+    def test_an_apology_with_no_answer_costs_one_more_call_to_get_one(self):
+        """When nothing survives the scrub and a question is outstanding, a
+        confirmation-only reply is exactly the complaint — spend a round-trip."""
+        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        script = _Script(
+            text_resp("Done — Planta Queen dinner. Today: Call Clint at 5:45pm."),
+            _FakeResp(
+                _FakeToolBlock("complete_item", {"item_id": dinner}),
+                _FakeTextBlock("You're right — I need to actually complete that item."),
+            ),
+            text_resp("Call Clint at 5:45pm is the only thing left today."),
+        )
+        reply = self._respond(script, self.ASK)
+        self.assertEqual(script.calls, 3)
+        self.assertIn("Call Clint", reply)
+        self.assertNotIn("You're right", reply)
+
+    def test_no_extra_call_when_there_was_no_question(self):
+        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        script = _Script(
+            text_resp("Checked off the Planta Queen dinner."),
+            _FakeResp(
+                _FakeToolBlock("complete_item", {"item_id": dinner}),
+                _FakeTextBlock("You're right — I need to actually complete that item."),
+            ),
+        )
+        reply = self._respond(script, "Planta dinner was last night, you can complete it.")
+        self.assertEqual(script.calls, 2, "no question outstanding — nothing to chase")
+        self.assertIn("Planta Queen", reply)
+        self.assertNotIn("You're right", reply)
+
+    def test_the_corrective_note_demands_both_halves(self):
+        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        notes = []
+        orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
+
+        def capture(**kw):
+            for m in kw["messages"]:
+                if m["role"] == "user" and isinstance(m["content"], list):
+                    for b in m["content"]:
+                        if b.get("type") == "text" and "automated system check" in b.get("text", ""):
+                            notes.append(b["text"])
+            if not notes:
+                # first draft: the claim with no tool call behind it, which is
+                # what makes the guard fire in the first place
+                return text_resp("Done — Planta Queen dinner. Call Clint at 5:45pm is left.")
+            return _FakeResp(_FakeToolBlock("complete_item", {"item_id": dinner}),
+                             _FakeTextBlock("Done — dinner checked off. Call Clint at 5:45pm is left."))
+
+        self.brain.client.messages.create = capture
+        self.brain.llm_claims_change = lambda text: False
+        try:
+            self.brain.respond(self.ASK)
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_judge
+        self.assertTrue(notes, "the guard should have fired on a claim with no tool call")
+        self.assertIn("asked a QUESTION", notes[0])
+        self.assertIn("BOTH", notes[0])
+
+
+class TestStripDirtySentences(unittest.TestCase):
+    def setUp(self):
+        import brain
+        self.brain = brain
+
+    def test_keeps_content_around_an_apology(self):
+        out = self.brain._strip_dirty_sentences(
+            "You're right — I need to actually complete that item. Call Clint at 5:45pm is what's left.")
+        self.assertEqual(out, "Call Clint at 5:45pm is what's left.")
+
+    def test_keeps_bulleted_lists(self):
+        out = self.brain._strip_dirty_sentences(
+            "My mistake.\n- Call Clint at 5:45pm\n- Get groceries")
+        self.assertIn("Call Clint at 5:45pm", out)
+        self.assertIn("Get groceries", out)
+        self.assertNotIn("My mistake", out)
+
+    def test_returns_empty_when_there_is_nothing_but_apology(self):
+        self.assertEqual(
+            self.brain._strip_dirty_sentences("You're right — I need to actually complete that item."), "")
+
+    def test_leaves_clean_text_untouched(self):
+        clean = "Call Clint at 5:45pm is the only thing left today."
+        self.assertEqual(self.brain._strip_dirty_sentences(clean), clean)
+
+
+class TestAnswerCompletenessNet(unittest.TestCase):
+    """Verified live against the real API on a copy of jarvis's DB: asked "Got
+    groceries, you can complete that. What else is on tap for me today?" the
+    model completed groceries correctly and then named 3 of the 7 remaining
+    due-today items — the three whose times were still ahead — silently
+    dropping every OVERDUE one. Those are exactly the items he most needs.
+
+    The state block already hands over the code-computed bucket and the prompt
+    already says to read out all of it. Two other instructions the model quietly
+    ignored today (the weekday table, "never say you're right") make the lesson
+    clear: verify in code, don't ask more firmly."""
+
+    def setUp(self):
+        fresh_db()
+        import brain
+        self.brain = brain
+        self.now = datetime.now(config.TZ)
+
+    def test_whats_left_phrasings_from_his_real_messages(self):
+        for text in ["What else is on tap for me today?", "Whats left today?", "What's left?",
+                     "What else do I have to do today?", "anything else today?",
+                     "What's on my list?"]:
+            with self.subTest(text=text):
+                self.assertTrue(self.brain.WHATS_LEFT_RE.search(text))
+
+    def test_unrelated_questions_do_not_trigger_the_net(self):
+        for text in ["When is my dentist appointment?", "Remind me to call grandma tomorrow",
+                     "What do you think about Costco for the bulk order?"]:
+            with self.subTest(text=text):
+                self.assertIsNone(self.brain.WHATS_LEFT_RE.search(text))
+
+    def test_omitted_overdue_items_are_detected(self):
+        memory.add_item("Take Wednesday the 19th and Saturday the 22nd in Workday",
+                        due_at=iso(self.now - timedelta(days=1)))
+        memory.add_item("Use Fable to get AIssistant SAFELY public on GitHub and LinkedIn",
+                        due_at=iso(self.now - timedelta(days=1)))
+        memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
+        import scheduler
+        due, _ = scheduler.digest_buckets(memory.open_items(), self.now)
+        reply = "Pushups by 11:59pm is all that's left today."
+        omitted = self.brain._missing_from_answer(reply, due)
+        titles = [i["title"] for i in omitted]
+        self.assertEqual(len(omitted), 2)
+        self.assertTrue(any("Workday" in t for t in titles))
+        self.assertTrue(any("AIssistant" in t for t in titles))
+
+    def test_a_paraphrased_mention_counts_as_mentioned(self):
+        """The model shortens titles; the net must not claim a false omission."""
+        self.assertTrue(self.brain._title_is_mentioned(
+            "Rework resume for Clint", "Rework resume at 7:26pm and pushups are left."))
+        self.assertTrue(self.brain._title_is_mentioned(
+            "Take Wednesday the 19th and Saturday the 22nd in Workday",
+            "the Workday request for Wednesday the 19th and Saturday the 22nd"))
+
+    def test_an_unmentioned_item_is_not_falsely_matched(self):
+        self.assertFalse(self.brain._title_is_mentioned(
+            "Talk to Kyra's dad about Sieman's", "Pushups by 11:59pm is all that's left today."))
+
+    def test_a_complete_answer_gets_nothing_appended(self):
+        memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
+        memory.add_item("Call Clint", due_at=iso(self.now.replace(hour=17, minute=45)))
+        import scheduler
+        due, _ = scheduler.digest_buckets(memory.open_items(), self.now)
+        self.assertEqual(
+            self.brain._missing_from_answer("Call Clint at 5:45pm and Pushups tonight.", due), [])
+
+    def test_the_net_appends_omissions_to_the_real_reply(self):
+        memory.set_setting("owner_chat_id", "12345")
+        memory.add_item("Talk to Kyra's dad about Sieman's", due_at=iso(self.now.replace(hour=9)))
+        memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
+        script = _Script(text_resp("Pushups by 11:59pm is all that's left today."))
+        orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
+        self.brain.client.messages.create = script
+        self.brain.llm_claims_change = lambda text: False
+        try:
+            reply = self.brain.respond("What else is on tap for me today?")
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_judge
+        self.assertIn("Also still on today", reply)
+        self.assertIn("Kyra", reply)
+
+    def test_an_item_completed_this_turn_is_not_resurrected_by_the_net(self):
+        """The net runs after the tools settle, so "I did X, what's left?" must
+        never list X back at him."""
+        memory.set_setting("owner_chat_id", "12345")
+        groceries = memory.add_item("Get groceries", due_at=iso(self.now - timedelta(days=2)))
+        memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
+        script = _Script(
+            _FakeResp(_FakeToolBlock("complete_item", {"item_id": groceries}),
+                      _FakeTextBlock("Done — Get groceries. Pushups tonight is what's left.")),
+            text_resp("Done — Get groceries. Pushups tonight is what's left."),
+        )
+        orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
+        self.brain.client.messages.create = script
+        self.brain.llm_claims_change = lambda text: False
+        try:
+            reply = self.brain.respond("Got groceries, you can complete that. What else is on tap today?")
+        finally:
+            self.brain.client.messages.create = orig_create
+            self.brain.llm_claims_change = orig_judge
+        self.assertNotIn("Also still on today", reply)
+        self.assertEqual(memory.get_item(groceries)["status"], "done")
+
+    def test_a_shared_name_alone_is_not_a_match(self):
+        """Caught in the live replay: with a 60% word threshold "Call Clint"
+        scored as mentioned purely because "Clint" appeared in a DIFFERENT
+        item's title, so a genuinely omitted item was reported as covered.
+        Two shared words is a match; one shared name is a coincidence."""
+        reply = "Rework resume for Clint at 7:26pm and pushups tonight are what's left."
+        self.assertFalse(self.brain._title_is_mentioned("Call Clint", reply))
+        self.assertTrue(self.brain._title_is_mentioned("Rework resume for Clint", reply))
+
+    def test_short_titles_need_every_word(self):
+        self.assertFalse(self.brain._title_is_mentioned("Get groceries", "Get the car washed."))
+        self.assertTrue(self.brain._title_is_mentioned("Get groceries", "Groceries before you get home."))

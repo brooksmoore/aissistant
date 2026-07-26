@@ -157,7 +157,12 @@ but say what actually happened — the real last-logged count and that it was sk
 target number was reached when it wasn't.
 
 SPEAK: 1-3 short, complete, natural sentences ("I'll remind you tonight at 7:30" — never "pinged tonight", \
-never a bare "Done."). Every confirmation names what changed. Obey the emoji_level and reply_length preferences; \
+never a bare "Done."). Every confirmation names what changed. ONE MESSAGE, EVERY PART: {_S} routinely sends an \
+action and a question together ("Planta dinner was last night, you can complete it. What else is on tap for me \
+today?"). Make the tool call(s) FIRST — actually emit them, never write a reply that merely sounds like you did — \
+then answer the question in the same reply. Answering the question while forgetting the tool call, or confirming \
+the action while silently dropping the question, are both failures; three live turns on 2026-07-25 got the action \
+right and never answered {_O} at all. Count the asks in {_P} message and make sure your reply addresses each one. Obey the emoji_level and reply_length preferences; \
 at most one emoji regardless. No headers, no sign-offs, no restating {_P} list unprompted. When {_S} tells you \
 directly to check something off ("check off X", "I already did X"), the tool call has already succeeded by the \
 time you reply — confirm it plainly by name ("Done — X."). Real incidents (2026-07-22 and 2026-07-23, jarvis): \
@@ -926,6 +931,12 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             return "Done — " + " and ".join(new_did[:3]) + "."
         return ""
 
+    # A message that mixes an action with a question is the single most common
+    # shape he sends ("Planta dinner was last night, you can complete it. What
+    # else is on tap for me today?"), and it is the shape every guard path
+    # historically mangled — see _ANSWER_BOTH_CLAUSE.
+    asked_question = _asks_a_question(user_text)
+
     def _corrective(note: str) -> tuple:
         """One corrective round-trip. Appends the model's last turn plus an
         automated-check note, re-asks, runs whatever tools come back, and
@@ -935,6 +946,8 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         (not an earlier round-trip) successfully ran at least one tool."""
         nonlocal resp
         before_c, before_d = len(captured), len(did)
+        if asked_question:
+            note = note.rstrip(")") + _ANSWER_BOTH_CLAUSE + ")"
         messages.append({"role": "assistant", "content": resp.content})
         messages.append({"role": "user", "content": [{"type": "text", "text": note}]})
         resp = _create(messages)
@@ -968,7 +981,37 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         if work_done:
             replacement = _confirmation_from(captured, did)
             if replacement:
-                log.info("scrubbed self-correcting prose from a successful retry: %r", retry_text[:200])
+                # Keep whatever ELSE the retry said. Substituting the bare
+                # confirmation wholesale is what silently ate his questions:
+                # on 2026-07-25 5:22pm "Planta dinner was last night, you can
+                # complete it. What else is on tap for me today?" produced a
+                # first draft that both confirmed AND answered — but with no
+                # tool call, so the guard fired, the retry made the real call
+                # and said only "You're right — I need to actually complete
+                # that item", and this function replaced that with a
+                # confirmation-only line. The action was right, the answer was
+                # gone. Strip only the offending sentences.
+                kept = _strip_dirty_sentences(retry_text)
+                log.info("scrubbed self-correcting prose from a successful retry (kept %d chars): %r",
+                         len(kept), retry_text[:200])
+                if kept:
+                    return f"{replacement} {kept}"
+                if asked_question:
+                    # Nothing survived and he asked something — a confirmation
+                    # alone would leave the question hanging, which is the exact
+                    # complaint this whole path caused. Spend one more call.
+                    log.warning("retry left no answer to a question; asking for both halves")
+                    answer, _w = _corrective(
+                        f"(automated system check — {_S} cannot see this. The action is already "
+                        f"done, so do NOT call any tool again. {_Scap} also asked a question in "
+                        f"that same message and it has not been answered yet. Reply with one "
+                        f"short line confirming what was done, then answer {_P} question — if it "
+                        "was about what's left/due today, read out the DUE TODAY OR OVERDUE "
+                        "bucket in full with its count. No apology, no reference to this check.)"
+                    )
+                    cleaned = _strip_dirty_sentences(answer)
+                    if cleaned:
+                        return cleaned if replacement.rstrip(".") in cleaned else f"{replacement} {cleaned}"
                 return replacement
             return retry_text
         # Nothing was done AND the reply is apologising or narrating the check:
@@ -1144,6 +1187,25 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
 
     if not text:
         text = _confirmation_from(captured, did) or "That didn't save properly on my end — send it once more?"
+
+    # Answer-completeness net. Runs LAST, after every tool call has settled, so
+    # "I did X, what's left?" is checked against the list as it stands AFTER the
+    # completion — the item he just closed must not come back in the answer.
+    # Deterministic and unignorable, unlike the prompt rule it backs up.
+    if WHATS_LEFT_RE.search(user_text):
+        due_today, _spare = scheduler.digest_buckets(memory.open_items(), datetime.now(TZ))
+        omitted = _missing_from_answer(text, due_today)
+        if omitted:
+            log.warning("answer omitted %d/%d due-today item(s); appending: %r",
+                        len(omitted), len(due_today), [i["title"] for i in omitted])
+            names = []
+            for i in omitted[:8]:
+                d = memory.parse_dt(i["due_at"])
+                late = " (overdue)" if d and d.date() < datetime.now(TZ).date() else ""
+                names.append(f"{i['title']}{late}")
+            more = f" …and {len(omitted) - 8} more" if len(omitted) > 8 else ""
+            text = f"{text}\n\nAlso still on today: {', '.join(names)}{more}."
+
     memory.log_msg("assistant", text)
     return text
 
@@ -1155,7 +1217,17 @@ CLAIM_PATTERN = (
     # them the guard never runs (captured is non-empty), so matching them here
     # only ever fires on the empty-promise case (seen live 2026-07-16: "Got it:
     # bring AirPods..." with zero tool calls and nothing saved)
-    r"dropped the|saved that|\bgot it\b|\bnoted\b"
+    r"dropped the|saved that|\bgot it\b|\bnoted\b|"
+    # "Done — X" / "Done: X" / "Done, X" is this assistant's single most common
+    # confirmation phrasing and was somehow never in this pattern. The 2026-07-25
+    # 5:22pm incident ("Done — Planta Queen dinner.") only got caught because the
+    # PAID llm_claims_change judge ran as the second layer — the free regex layer
+    # missed it, which means every "Done —" empty promise was costing a model call
+    # to detect and would have shipped uncaught if that judge had failed open.
+    # Safe to match aggressively: the guard only ever runs when zero tools
+    # succeeded, so this can only fire on a turn where nothing actually happened.
+    r"^done\s*[—\-:,]|\bdone\s*[—:]|\bmarked\b.{0,30}\b(?:done|complete)|"
+    r"\bcompleted\b|checked that off|\ball set\b"
 )
 _CLAIM_RE = re.compile(CLAIM_PATTERN, re.IGNORECASE)
 
@@ -1208,6 +1280,103 @@ _LEAK_RE = re.compile("|".join(_LEAK_PATTERNS), re.IGNORECASE)
 def _detects_leak(text: str) -> bool:
     """True if a reply is narrating the guard machinery rather than answering."""
     return bool(_LEAK_RE.search(text))
+
+
+_QUESTION_RE = re.compile(
+    r"\?|^\s*(?:what|when|where|which|who|why|how|do i|did i|am i|is there|are there|anything)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+WHATS_LEFT_RE = re.compile(
+    r"what(?:'?s| is| else| do i| have i)?.{0,25}\b(?:left|remain|on tap|to do|due|outstanding|still)\b|"
+    r"what else|anything else|what'?s (?:on )?(?:my )?(?:list|plate|agenda)|rest of (?:my|the) day",
+    re.IGNORECASE,
+)
+
+_STOPWORDS = frozenset(
+    "the a an and or for to of in on at with my me your his her their this that from into about".split()
+)
+
+
+def _title_is_mentioned(title: str, reply: str) -> bool:
+    """Fuzzy: does the reply appear to name this item? The model paraphrases
+    ("Rework resume for Clint" -> "rework resume"), so exact matching would
+    report false omissions. Requires most of the title's distinctive words."""
+    low = reply.lower()
+    if title.lower() in low:
+        return True
+    words = [w for w in re.findall(r"[a-z0-9']+", title.lower())
+             if len(w) > 3 and w not in _STOPWORDS]
+    if not words:
+        return title.lower()[:12] in low
+    hits = sum(1 for w in words if w in low)
+    # Short titles need EVERY word. Caught in the live replay: with a 60%
+    # threshold, "Call Clint" counted as mentioned purely because "Clint"
+    # appeared in a different item ("Rework resume for Clint"), so a genuinely
+    # omitted item was scored as covered. Two shared words is a match; one
+    # shared name is a coincidence.
+    need = len(words) if len(words) <= 2 else max(2, round(len(words) * 0.6))
+    return hits >= need
+
+
+def _missing_from_answer(reply: str, due_today: list) -> list:
+    """Items genuinely due today that the reply never mentioned.
+
+    The state block already hands over a code-computed DUE TODAY OR OVERDUE
+    bucket and the prompt says to read out every item in it. The model still
+    doesn't: asked "what else is on tap for me today?" with 7 items in that
+    bucket, it named 3 — the three whose times were still ahead — and silently
+    dropped every OVERDUE one. Those are precisely the items he most needs to
+    see, and it's what makes the list feel untrustworthy.
+
+    Two failed attempts at fixing this by instruction (the weekday table, the
+    "never say you're right" rule) say the same thing: an instruction the model
+    can quietly not follow is not a fix. So the answer is verified against the
+    data instead, and anything omitted is appended by code."""
+    return [i for i in due_today if not _title_is_mentioned(i["title"], reply)]
+
+
+def _asks_a_question(text: str) -> bool:
+    """Does the owner's message contain a question needing an answer?
+
+    Gates the "answer both halves" clause below. A message that mixes an action
+    with a question — "Planta dinner was last night, you can complete it. What
+    else is on tap for me today?" — is the most common shape he sends and the
+    one every guard path used to mangle, because each guard was built to make an
+    ACTION correct and none of them knew a question was also outstanding."""
+    return bool(_QUESTION_RE.search(text))
+
+
+# Appended to every corrective note when the owner's message contained a
+# question. Each guard was written to get the action right; none of them knew
+# the message might have a second half. Live (2026-07-25): three separate turns
+# where the action ended up correct and the question was never answered at all.
+_ANSWER_BOTH_CLAUSE = (
+    f" IMPORTANT: {_S} asked a QUESTION in that same message as well as asking for an action. "
+    "Your reply must contain BOTH — one short line confirming what you actually did, then the "
+    f"answer to {_P} question. A reply that only confirms the action and silently drops the "
+    "question is a failure, no matter how correct the action was. If the question was about "
+    "what's left/due/on tap today, read out the DUE TODAY OR OVERDUE bucket in full with its count."
+)
+
+
+def _strip_dirty_sentences(text: str) -> str:
+    """Removes only the apologetic / machinery-narrating sentences, keeping any
+    real content around them — so a retry that both apologises AND answers
+    keeps its answer instead of being replaced wholesale."""
+    kept = []
+    for line in text.splitlines():
+        if not line.strip():
+            kept.append(line)
+            continue
+        # split into sentences but keep list bullets and short fragments intact
+        parts = re.split(r"(?<=[.!?])\s+", line)
+        good = [p for p in parts
+                if p.strip() and not SELF_CORRECTION_RE.search(p) and not _detects_leak(p)]
+        if good:
+            kept.append(" ".join(good))
+    return "\n".join(kept).strip()
 
 
 # A promise that a ping now exists. Future tense on purpose — "I'll remind you
