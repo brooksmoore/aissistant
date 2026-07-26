@@ -35,12 +35,14 @@ OWNER_PRONOUN_POSS = os.getenv("OWNER_PRONOUN_POSS", "her")   # her / his / thei
 OWNER_POSS_PRED = os.getenv("OWNER_POSS_PRED", "hers")        # hers / his / theirs (predicate: "all hers to set")
 
 # The one-sentence framing of what the owner struggles with and why this assistant
-# helps — the original Penny framing assumed anxiety specifically, which doesn't
-# hold for every owner. Override per-instance in .env; default preserves Penny's
-# original sentence exactly.
+# helps. Set this per-instance in .env — it is the one line of the prompt that is
+# genuinely about the specific person, so the shipped default is deliberately
+# generic. (It used to hard-code a real owner's health framing, which is that
+# person's private information and has no business in a published codebase; the
+# live instances now set their own wording in their own .env.)
 OWNER_FRAME = os.getenv(
     "OWNER_FRAME",
-    "Her anxiety comes from holding everything in her head; your job is to hold it for her, reliably and calmly.",
+    "The load comes from holding everything in your head; your job is to hold it instead, reliably and calmly.",
 )
 
 

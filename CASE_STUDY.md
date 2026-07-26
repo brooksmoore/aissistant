@@ -6,8 +6,8 @@ Things said out loud get forgotten. "Remind me to return that package." "Dinner 
 parents is Friday." "I need to write the birthday card before Tuesday." To-do apps solve
 this in theory, but they ask you to stop what you are doing, open a form, and type. In
 practice the thought arrives while walking, driving, or half asleep, so it never gets
-written down, and the person carries it around in their head. For someone with anxiety,
-that carrying is the whole problem.
+written down, and the person carries it around in their head. When the load is already
+heavy, that carrying is the whole problem.
 
 ## What I built
 
@@ -60,7 +60,7 @@ alert and getting nothing. Verification beats assumption at every layer.
 ## What it costs and what it does
 
 A few cents per person per day. Two daily users. Running continuously since July 8, 2026,
-with one six-hour outage, now guarded against. 202 automated tests that cost nothing to
+with one six-hour outage, now guarded against. 242 automated tests that cost nothing to
 run, plus 35 checks that run against the live AI model on a budget cap. Every bug that
 reached a real user got a permanent regression test before its fix shipped.
 

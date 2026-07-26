@@ -166,7 +166,7 @@ class TestMissedRecurrenceRollsForward(unittest.TestCase):
 
 class TestPastTimesAreRejected(unittest.TestCase):
     """Real incident (jarvis, 2026-07-24 4:18pm): "remind me in an hour to take
-    Wednesday the 19th and Saturday the 22nd in Workday" was saved with a
+    Wednesday the 19th and Saturday the 22nd in PTO portal" was saved with a
     due_at of 1:18pm the SAME day — three hours in the past. It fired
     immediately, then nudged every 30 minutes: 6 pings in 2 hours, a quarter of
     that day's whole notification volume. Nothing checked the date."""
@@ -177,7 +177,7 @@ class TestPastTimesAreRejected(unittest.TestCase):
         self.brain = brain
 
     def _capture(self, **extra):
-        inp = {"title": "Take Wednesday off in Workday", "category": "task", "priority": 3}
+        inp = {"title": "Take Wednesday off in PTO portal", "category": "task", "priority": 3}
         inp.update(extra)
         return self.brain._run_tool("capture_item", inp)
 
@@ -301,12 +301,12 @@ class TestPartialFulfillmentGuard(unittest.TestCase):
     """The empty-promise guard only ever ran when ZERO tools succeeded, so a
     turn that did three real things and fabricated a fourth went unchecked.
     Two live cases:
-      - jarvis 2026-07-19: a Brian reminder and a pushup reset both happened,
-        then the reply added "and marked the car clubs done" — an item the
+      - jarvis 2026-07-19: a Jordan reminder and a pushup reset both happened,
+        then the reply added "and marked the gym bag done" — an item the
         message never mentioned, never completed.
-      - penny 2026-07-24: "REVOLVE return and movie night checked off. I'll
-        ping you tomorrow morning at 8 AM about the Nespresso order." Both
-        check-offs real; the Nespresso reschedule never happened, and six days
+      - penny 2026-07-24: "store return and the show checked off. I'll
+        ping you tomorrow morning at 8 AM about the coffee pod order." Both
+        check-offs real; the coffee pods reschedule never happened, and six days
         later that item still carried its original due date."""
 
     def setUp(self):
@@ -326,39 +326,39 @@ class TestPartialFulfillmentGuard(unittest.TestCase):
             self.brain.llm_claims_change = orig_judge
 
     def test_promised_ping_with_no_reminder_call_is_challenged(self):
-        done = memory.add_item("REVOLVE return")
-        nespresso = memory.add_item("Order more Nespresso",
+        done = memory.add_item("store return")
+        nespresso = memory.add_item("Order more coffee pods",
                                     due_at=iso(datetime.now(config.TZ) - timedelta(days=5)))
         tomorrow = datetime.now(config.TZ) + timedelta(days=1)
         script = _Script(
             _FakeResp(_FakeToolBlock("complete_item", {"item_id": done})),
-            text_resp("Done — REVOLVE return checked off. I'll ping you tomorrow morning at 8 AM "
-                      "about the Nespresso order."),
+            text_resp("Done — store return checked off. I'll ping you tomorrow morning at 8 AM "
+                      "about the coffee pod order."),
             _FakeResp(
                 _FakeToolBlock("update_item", {"item_id": nespresso, "remind_at": iso(tomorrow)}),
-                _FakeTextBlock("Done — REVOLVE return checked off, and the Nespresso ping is set "
+                _FakeTextBlock("Done — store return checked off, and the coffee pods ping is set "
                                "for tomorrow at 8am."),
             ),
         )
-        reply = self._respond(script, "check off Revolve Return but please remind me tomorrow about Nespresso")
+        reply = self._respond(script, "check off store return but please remind me tomorrow about coffee pods")
         self.assertEqual(script.calls, 3, "the unbacked reminder promise must force one retry")
         self.assertTrue(memory.pending_reminder_times(nespresso), "the promised ping must now exist")
-        self.assertIn("Nespresso", reply)
+        self.assertIn("coffee pods", reply)
 
     def test_claimed_completion_with_no_complete_call_is_challenged(self):
-        clubs = memory.add_item("Take clubs out of car")
+        clubs = memory.add_item("Take the gym bag out of the car")
         script = _Script(
-            _FakeResp(_FakeToolBlock("capture_item", {"title": "Respond to Brian", "category": "task",
+            _FakeResp(_FakeToolBlock("capture_item", {"title": "Respond to Jordan", "category": "task",
                                                       "priority": 3})),
-            text_resp("Got it: respond to Brian in an hour, and marked the car clubs done."),
-            text_resp("Got it: respond to Brian in an hour. I left the clubs on your list — say the "
+            text_resp("Got it: respond to Jordan in an hour, and marked the gym bag done."),
+            text_resp("Got it: respond to Jordan in an hour. I left the gym bag on your list — say the "
                       "word and I'll check it off."),
         )
-        reply = self._respond(script, "Remind me to respond to Brian in an hour")
+        reply = self._respond(script, "Remind me to respond to Jordan in an hour")
         self.assertEqual(script.calls, 3)
         self.assertEqual(memory.get_item(clubs)["status"], "open",
                          "the guard must not 'fix' a fabricated claim by really completing the item")
-        self.assertNotIn("marked the car clubs done", reply)
+        self.assertNotIn("marked the gym bag done", reply)
 
     def test_an_honest_confirmation_costs_no_extra_round_trip(self):
         """The check is deterministic and must stay off the common path — an
@@ -376,11 +376,11 @@ class TestPartialFulfillmentGuard(unittest.TestCase):
 
 class TestQuestionMustNotSwallowTheMessage(unittest.TestCase):
     """Real incident (penny, 2026-07-22 9:02pm): one message held four things —
-    "I already returned the Revolve package but remind me next week to check if
-    I got a refund... and remind me tomorrow to order more Nespresso or remind
+    "I already returned the store package but remind me next week to check if
+    I got a refund... and remind me tomorrow to order more coffee pods or remind
     me on Friday as well." Penny asked which day she meant and saved NOTHING,
     completed NOTHING. She never answered, so the refund reminder has never
-    existed, and the REVOLVE item kept being listed as due for two more days."""
+    existed, and the the store item kept being listed as due for two more days."""
 
     def setUp(self):
         fresh_db()
@@ -405,17 +405,17 @@ class TestQuestionMustNotSwallowTheMessage(unittest.TestCase):
 
     def test_bare_question_with_nothing_saved_forces_a_partial_capture(self):
         script = _Script(
-            text_resp("I need to clarify the Nespresso reminders — tomorrow *and* Friday, or just one?"),
+            text_resp("I need to clarify the coffee pod reminders — tomorrow *and* Friday, or just one?"),
             _FakeResp(
-                _FakeToolBlock("capture_item", {"title": "Check if REVOLVE refund posted",
+                _FakeToolBlock("capture_item", {"title": "Check if the store refund posted",
                                                 "category": "task", "priority": 3}),
-                _FakeTextBlock("Saved the refund check. On the Nespresso reminder — tomorrow, Friday, "
+                _FakeTextBlock("Saved the refund check. On the coffee pod reminder — tomorrow, Friday, "
                                "or both?"),
             ),
         )
-        reply = self._respond(script, "I already returned the Revolve package but remind me next week "
+        reply = self._respond(script, "I already returned the store package but remind me next week "
                                       "to check if I got a refund, and remind me tomorrow to order "
-                                      "more Nespresso or remind me on Friday as well.")
+                                      "more coffee pods or remind me on Friday as well.")
         self.assertEqual(script.calls, 2)
         self.assertEqual(len(memory.open_items()), 1, "the unambiguous ask must be banked")
         self.assertIn("?", reply, "the genuinely ambiguous part is still asked about")
@@ -433,9 +433,9 @@ class TestClaimPatternsForPartialFulfillment(unittest.TestCase):
 
     def test_reminder_promises_are_detected(self):
         for text in ["I'll remind you tonight at 7:30.",
-                     "I'll ping you tomorrow morning at 8 AM about the Nespresso order.",
+                     "I'll ping you tomorrow morning at 8 AM about the coffee pod order.",
                      "Your reminder is now set for 8pm.",
-                     "Got it — pinged at 8:00am tomorrow to talk to Kyra's dad."]:
+                     "Got it — pinged at 8:00am tomorrow to talk to Riley's dad."]:
             with self.subTest(text=text):
                 self.assertTrue(self.brain.PROMISED_REMINDER_RE.search(text))
 
@@ -449,10 +449,10 @@ class TestClaimPatternsForPartialFulfillment(unittest.TestCase):
                 self.assertFalse(self.brain.PROMISED_REMINDER_RE.search(text))
 
     def test_completion_claims_are_detected(self):
-        for text in ["and marked the car clubs done.",
+        for text in ["and marked the gym bag done.",
                      "Done — bodyweight workout checked off.",
                      "Dinner order and pushups both checked off.",
-                     "Job scout and Mercor completed."]:
+                     "Job scout and the recruiter completed."]:
             with self.subTest(text=text):
                 self.assertTrue(self.brain.CLAIMED_COMPLETION_RE.search(text))
 
@@ -476,7 +476,7 @@ class TestClaimPatternsForPartialFulfillment(unittest.TestCase):
 class TestUpdateConfirmationNamesTheChange(unittest.TestCase):
     """Real incident (jarvis, 2026-07-22 5:00am): "Move dinner on Thursday to
     Friday at 7:15pm" was confirmed as `Done — updated "dinner reservation at
-    planta queen"` — and the date it actually wrote was wrong. A confirmation
+    the bistro"` — and the date it actually wrote was wrong. A confirmation
     that names no value is one the owner cannot check."""
 
     def setUp(self):
@@ -574,9 +574,9 @@ class TestDigestTidying(unittest.TestCase):
         """scheduler.py already prefixes "Morning! It's Saturday, July 25." —
         the model then wrote its own header under it, so the date shipped
         twice on 3 of 5 jarvis digests and 4 of 6 of penny's."""
-        raw = "Morning digest for Saturday, July 25\n\nTake Workday off first.\n(35 things safely on the list)"
+        raw = "Morning digest for Saturday, July 25\n\nTake PTO portal off first.\n(35 things safely on the list)"
         out = self.brain._tidy_digest(raw, self.now)
-        self.assertTrue(out.startswith("Take Workday off first."))
+        self.assertTrue(out.startswith("Take PTO portal off first."))
         self.assertIn("35 things safely on the list", out)
 
     def test_bare_weekday_header_is_stripped(self):
@@ -597,7 +597,7 @@ class TestDigestTidying(unittest.TestCase):
         self.assertIn("\nSee movie tonight.", out)
 
     def test_normal_mixed_case_text_is_untouched(self):
-        raw = "Take Workday off first.\n\nThen the Fable prompt."
+        raw = "Take PTO portal off first.\n\nThen the Fable prompt."
         self.assertEqual(self.brain._tidy_digest(raw, self.now), raw)
 
 
@@ -693,13 +693,13 @@ class TestStaleSweep(unittest.TestCase):
         self.old = iso(datetime.now(config.TZ) - timedelta(days=4))
 
     def test_the_message_names_the_items(self):
-        memory.add_item("Order more Nespresso", due_at=self.old)
+        memory.add_item("Order more coffee pods", due_at=self.old)
         ctx = FakeContext()
         run(self.scheduler._stale_sweep(ctx, "12345"))
-        self.assertIn("Order more Nespresso", ctx.bot.sent[0]["text"])
+        self.assertIn("Order more coffee pods", ctx.bot.sent[0]["text"])
 
     def test_the_same_item_is_not_swept_again_the_next_morning(self):
-        memory.add_item("Order more Nespresso", due_at=self.old)
+        memory.add_item("Order more coffee pods", due_at=self.old)
         first = FakeContext()
         run(self.scheduler._stale_sweep(first, "12345"))
         self.assertEqual(len(first.bot.sent), 1)
@@ -708,7 +708,7 @@ class TestStaleSweep(unittest.TestCase):
         self.assertEqual(second.bot.sent, [], "an expired item must wait out its cooldown")
 
     def test_cooldown_expiry_lets_it_resurface(self):
-        memory.add_item("Order more Nespresso", due_at=self.old)
+        memory.add_item("Order more coffee pods", due_at=self.old)
         run(self.scheduler._stale_sweep(FakeContext(), "12345"))
         long_ago = (datetime.now(config.TZ)
                     - timedelta(days=self.scheduler.STALE_SWEEP_COOLDOWN_DAYS + 1)).date().isoformat()
@@ -720,17 +720,17 @@ class TestStaleSweep(unittest.TestCase):
         self.assertEqual(len(ctx.bot.sent), 1)
 
     def test_a_newly_expired_item_is_swept_even_while_another_is_cooling_down(self):
-        memory.add_item("Order more Nespresso", due_at=self.old)
+        memory.add_item("Order more coffee pods", due_at=self.old)
         run(self.scheduler._stale_sweep(FakeContext(), "12345"))
         memory.add_item("Check Partiful reminders", due_at=self.old)
         ctx = FakeContext()
         run(self.scheduler._stale_sweep(ctx, "12345"))
         self.assertIn("Check Partiful reminders", ctx.bot.sent[0]["text"])
-        self.assertNotIn("Nespresso", ctx.bot.sent[0]["text"])
+        self.assertNotIn("coffee pods", ctx.bot.sent[0]["text"])
 
     def test_corrupt_cooldown_state_fails_open(self):
         memory.set_setting("stale_swept_on", "{not json")
-        memory.add_item("Order more Nespresso", due_at=self.old)
+        memory.add_item("Order more coffee pods", due_at=self.old)
         ctx = FakeContext()
         run(self.scheduler._stale_sweep(ctx, "12345"))
         self.assertEqual(len(ctx.bot.sent), 1)
@@ -738,7 +738,7 @@ class TestStaleSweep(unittest.TestCase):
 
 class TestTodaysAgendaIsPrecomputed(unittest.TestCase):
     """Real failure (jarvis, 2026-07-25 5:22pm): "What else is on tap for me
-    today?" got the answer "Call Clint at 5:45pm." — ONE item out of six that
+    today?" got the answer "Call Dana at 5:45pm." — ONE item out of six that
     were genuinely open and dated today or earlier. The open-items list in the
     state block is flat, priority-sorted and carries raw ISO timestamps, so
     answering a "today" question meant scanning 30 lines and comparing dates by
@@ -753,14 +753,14 @@ class TestTodaysAgendaIsPrecomputed(unittest.TestCase):
     def test_every_due_or_overdue_item_is_listed_with_a_count(self):
         memory.add_item("Get groceries", due_at=iso(self.now - timedelta(days=2)))
         memory.add_item("Use Fable to get AIssistant public", due_at=iso(self.now - timedelta(days=1)))
-        memory.add_item("Call Clint", due_at=iso(self.now.replace(hour=17, minute=45)))
+        memory.add_item("Call Dana", due_at=iso(self.now.replace(hour=17, minute=45)))
         memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
         memory.add_item("Doctor appointment", due_at=iso(self.now + timedelta(days=2)))
 
         agenda = self.brain._agenda_text(memory.open_items())
         due_line = [l for l in agenda.splitlines() if "DUE TODAY OR OVERDUE" in l][0]
         self.assertIn("(4)", due_line, "the count must let him see nothing was trimmed")
-        for title in ("Get groceries", "Use Fable", "Call Clint", "Pushups"):
+        for title in ("Get groceries", "Use Fable", "Call Dana", "Pushups"):
             with self.subTest(title=title):
                 self.assertIn(title, due_line)
         self.assertNotIn("Doctor appointment", due_line)
@@ -781,14 +781,14 @@ class TestTodaysAgendaIsPrecomputed(unittest.TestCase):
         self.assertIn("graph article", no_date_line)
 
     def test_the_agenda_is_stable_within_a_day_so_the_state_block_still_caches(self):
-        memory.add_item("Call Clint", due_at=iso(self.now.replace(hour=17, minute=45)))
+        memory.add_item("Call Dana", due_at=iso(self.now.replace(hour=17, minute=45)))
         self.assertEqual(self.brain._agenda_text(memory.open_items()),
                          self.brain._agenda_text(memory.open_items()))
         self.assertNotIn("Now:", self.brain._agenda_text(memory.open_items()))
 
 
 class TestPingTodayCountsAsToday(unittest.TestCase):
-    """Real hole (jarvis, 2026-07-25 4:21pm): "Remind me to respond to Brian at
+    """Real hole (jarvis, 2026-07-25 4:21pm): "Remind me to respond to Jordan at
     7pm tonight" saved a 7pm reminder and NO due_at. The ping would have fired
     correctly, but the item was invisible to every "what's due today"
     calculation — including the morning digest — and would have been offered
@@ -804,13 +804,13 @@ class TestPingTodayCountsAsToday(unittest.TestCase):
         self.now = datetime.now(config.TZ)
 
     def test_undated_item_pinging_today_is_a_today_item(self):
-        memory.add_item("Respond to Brian", remind_at=iso(self.now.replace(hour=19, minute=0)))
+        memory.add_item("Respond to Jordan", remind_at=iso(self.now.replace(hour=19, minute=0)))
         due, spare = self.scheduler.digest_buckets(memory.open_items(), self.now)
-        self.assertEqual([i["title"] for i in due], ["Respond to Brian"])
+        self.assertEqual([i["title"] for i in due], ["Respond to Jordan"])
         self.assertEqual(spare, [], "something with a ping tonight is not spare-energy backlog")
 
     def test_its_ping_time_is_named_in_the_agenda(self):
-        memory.add_item("Respond to Brian", remind_at=iso(self.now.replace(hour=19, minute=0)))
+        memory.add_item("Respond to Jordan", remind_at=iso(self.now.replace(hour=19, minute=0)))
         self.assertIn("ping 7:00 PM today", self.brain._agenda_text(memory.open_items()))
 
     def test_a_night_before_ping_for_a_later_event_is_not_today(self):
@@ -842,7 +842,7 @@ class TestGuardNeverLeaksItsOwnMachinery(unittest.TestCase):
     should have just answered the question plainly... I'll reply correctly if he
     messages again." That is the model's reasoning about the injected system
     check, in the third person, delivered as a reply. The same turn also lost
-    the "Responded to Brian, you can complete that" check-off entirely."""
+    the "Responded to Jordan, you can complete that" check-off entirely."""
 
     def setUp(self):
         fresh_db()
@@ -871,32 +871,32 @@ class TestGuardNeverLeaksItsOwnMachinery(unittest.TestCase):
         self.assertTrue(self.brain._detects_leak(self.LEAK))
 
     def test_ordinary_replies_are_not_flagged_as_leaks(self):
-        for text in ["Call Clint at 5:45pm is what's left today.",
+        for text in ["Call Dana at 5:45pm is what's left today.",
                      "Done — groceries checked off.",
-                     "Brian said he'd get back to you tomorrow.",
-                     "You have six things left today: groceries, the Workday request, and four more."]:
+                     "Jordan said he'd get back to you tomorrow.",
+                     "You have six things left today: groceries, the PTO portal request, and four more."]:
             with self.subTest(text=text):
                 self.assertFalse(self.brain._detects_leak(text))
 
     def test_a_leaked_reply_is_replaced_by_a_clean_re_answer(self):
-        memory.add_item("Call Clint", due_at=iso(datetime.now(config.TZ).replace(hour=17, minute=45)))
+        memory.add_item("Call Dana", due_at=iso(datetime.now(config.TZ).replace(hour=17, minute=45)))
         script = _Script(
-            text_resp("Checked off the Brian item — here's what's left today."),  # claim, no tools
+            text_resp("Checked off the Jordan item — here's what's left today."),  # claim, no tools
             text_resp(self.LEAK),                                             # leak, still no tools
-            text_resp("Call Clint at 5:45pm is the only thing left today."),  # clean
+            text_resp("Call Dana at 5:45pm is the only thing left today."),  # clean
         )
-        reply = self._respond(script, "Responded to Brian, you can complete that. Whats left today?")
+        reply = self._respond(script, "Responded to Jordan, you can complete that. Whats left today?")
         self.assertEqual(script.calls, 3)
-        self.assertEqual(reply, "Call Clint at 5:45pm is the only thing left today.")
+        self.assertEqual(reply, "Call Dana at 5:45pm is the only thing left today.")
         self.assertNotIn("he messages", reply)
 
     def test_a_second_leak_falls_back_instead_of_shipping_it(self):
         script = _Script(
-            text_resp("Checked off the Brian item."),
+            text_resp("Checked off the Jordan item."),
             text_resp(self.LEAK),
             text_resp("As I said, no tool call was needed for his question."),
         )
-        reply = self._respond(script, "Responded to Brian, you can complete that. Whats left today?")
+        reply = self._respond(script, "Responded to Jordan, you can complete that. Whats left today?")
         self.assertNotIn("his question", reply)
         self.assertNotIn("no tool call", reply)
 
@@ -904,7 +904,7 @@ class TestGuardNeverLeaksItsOwnMachinery(unittest.TestCase):
 class TestGuardDoesNotOfferAnEscapeHatchWhenActionWasAsked(unittest.TestCase):
     """The "nothing actually needed fixing" outcome was added 2026-07-16 for a
     real case (a diagnostic question whose accurate answer tripped the guard).
-    On 2026-07-25 it got abused: given "Responded to Brian, you can complete
+    On 2026-07-25 it got abused: given "Responded to Jordan, you can complete
     that. Whats left today?" the model took the hatch, decided he'd only asked
     a question, completed nothing — and that item was still open hours later.
     Whether the message contains a real ask is something code can decide."""
@@ -937,7 +937,7 @@ class TestGuardDoesNotOfferAnEscapeHatchWhenActionWasAsked(unittest.TestCase):
         return notes[0] if notes else ""
 
     def test_hatch_is_withheld_when_he_asked_for_a_completion(self):
-        note = self._corrective_note_for("Responded to Brian, you can complete that. Whats left today?")
+        note = self._corrective_note_for("Responded to Jordan, you can complete that. Whats left today?")
         self.assertIn("is NOT available here", note)
         self.assertIn("DID ask you to record", note)
 
@@ -1043,10 +1043,10 @@ class TestMultiPartMessageGetsAFullAnswer(unittest.TestCase):
     """Brooks: "Why doesn't Jarvis answer when I have multiple items in a
     message and ask what else is on my list?"
 
-    Traced to the guard log. At 2026-07-25 5:22pm he sent "Planta dinner was
+    Traced to the guard log. At 2026-07-25 5:22pm he sent "bistro dinner was
     last night, you can complete it. What else is on tap for me today?" and the
-    model's FIRST draft was right on both counts — "Done — Planta Queen dinner.
-    Today (Saturday, July 25): Call Clint at 5:45pm is all that's left." — but
+    model's FIRST draft was right on both counts — "Done — the bistro dinner.
+    Today (Saturday, July 25): Call Dana at 5:45pm is all that's left." — but
     it made zero tool calls, so the empty-promise guard fired. The retry made
     the real complete_item call and replied only "You're right — I need to
     actually complete that item", and _scrub_self_correction replaced that
@@ -1075,11 +1075,11 @@ class TestMultiPartMessageGetsAFullAnswer(unittest.TestCase):
             self.brain.llm_claims_change = orig_judge
             self.brain._missed_captures = orig_missed
 
-    ASK = "Planta dinner was last night, you can complete it. What else is on tap for me today?"
+    ASK = "bistro dinner was last night, you can complete it. What else is on tap for me today?"
 
     def test_question_detection_on_the_real_message_shapes(self):
         for text in [self.ASK,
-                     "Responded to Brian, you can complete that. Whats left today?",
+                     "Responded to Jordan, you can complete that. Whats left today?",
                      "Done on both, also completed the list of refer-able network\n\nWhat's left?",
                      "What else do I have to do today?"]:
             with self.subTest(text=text):
@@ -1095,55 +1095,55 @@ class TestMultiPartMessageGetsAFullAnswer(unittest.TestCase):
     def test_the_answer_survives_the_scrub(self):
         """The exact 5:22pm turn: apologetic retry, real tool call, and an
         answer that must not be thrown away with the apology."""
-        dinner = memory.add_item("Dinner reservation at Planta Queen")
-        memory.add_item("Call Clint", due_at=iso(datetime.now(config.TZ).replace(hour=17, minute=45)))
+        dinner = memory.add_item("Dinner reservation at the bistro")
+        memory.add_item("Call Dana", due_at=iso(datetime.now(config.TZ).replace(hour=17, minute=45)))
         script = _Script(
-            text_resp("Done — Planta Queen dinner.\n\nToday: Call Clint at 5:45pm is all that's left."),
+            text_resp("Done — the bistro dinner.\n\nToday: Call Dana at 5:45pm is all that's left."),
             _FakeResp(
                 _FakeToolBlock("complete_item", {"item_id": dinner}),
                 _FakeTextBlock("You're right — I need to actually complete that item. "
-                               "Today: Call Clint at 5:45pm is all that's left."),
+                               "Today: Call Dana at 5:45pm is all that's left."),
             ),
         )
         reply = self._respond(script, self.ASK)
         self.assertEqual(memory.get_item(dinner)["status"], "done")
         self.assertNotIn("You're right", reply)
-        self.assertIn("Call Clint", reply, "the answer to his question must survive")
-        self.assertIn("Planta Queen", reply, "and so must the confirmation")
+        self.assertIn("Call Dana", reply, "the answer to his question must survive")
+        self.assertIn("the bistro", reply, "and so must the confirmation")
 
     def test_an_apology_with_no_answer_costs_one_more_call_to_get_one(self):
         """When nothing survives the scrub and a question is outstanding, a
         confirmation-only reply is exactly the complaint — spend a round-trip."""
-        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        dinner = memory.add_item("Dinner reservation at the bistro")
         script = _Script(
-            text_resp("Done — Planta Queen dinner. Today: Call Clint at 5:45pm."),
+            text_resp("Done — the bistro dinner. Today: Call Dana at 5:45pm."),
             _FakeResp(
                 _FakeToolBlock("complete_item", {"item_id": dinner}),
                 _FakeTextBlock("You're right — I need to actually complete that item."),
             ),
-            text_resp("Call Clint at 5:45pm is the only thing left today."),
+            text_resp("Call Dana at 5:45pm is the only thing left today."),
         )
         reply = self._respond(script, self.ASK)
         self.assertEqual(script.calls, 3)
-        self.assertIn("Call Clint", reply)
+        self.assertIn("Call Dana", reply)
         self.assertNotIn("You're right", reply)
 
     def test_no_extra_call_when_there_was_no_question(self):
-        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        dinner = memory.add_item("Dinner reservation at the bistro")
         script = _Script(
-            text_resp("Checked off the Planta Queen dinner."),
+            text_resp("Checked off the the bistro dinner."),
             _FakeResp(
                 _FakeToolBlock("complete_item", {"item_id": dinner}),
                 _FakeTextBlock("You're right — I need to actually complete that item."),
             ),
         )
-        reply = self._respond(script, "Planta dinner was last night, you can complete it.")
+        reply = self._respond(script, "bistro dinner was last night, you can complete it.")
         self.assertEqual(script.calls, 2, "no question outstanding — nothing to chase")
-        self.assertIn("Planta Queen", reply)
+        self.assertIn("the bistro", reply)
         self.assertNotIn("You're right", reply)
 
     def test_the_corrective_note_demands_both_halves(self):
-        dinner = memory.add_item("Dinner reservation at Planta Queen")
+        dinner = memory.add_item("Dinner reservation at the bistro")
         notes = []
         orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
 
@@ -1156,9 +1156,9 @@ class TestMultiPartMessageGetsAFullAnswer(unittest.TestCase):
             if not notes:
                 # first draft: the claim with no tool call behind it, which is
                 # what makes the guard fire in the first place
-                return text_resp("Done — Planta Queen dinner. Call Clint at 5:45pm is left.")
+                return text_resp("Done — the bistro dinner. Call Dana at 5:45pm is left.")
             return _FakeResp(_FakeToolBlock("complete_item", {"item_id": dinner}),
-                             _FakeTextBlock("Done — dinner checked off. Call Clint at 5:45pm is left."))
+                             _FakeTextBlock("Done — dinner checked off. Call Dana at 5:45pm is left."))
 
         self.brain.client.messages.create = capture
         self.brain.llm_claims_change = lambda text: False
@@ -1179,13 +1179,13 @@ class TestStripDirtySentences(unittest.TestCase):
 
     def test_keeps_content_around_an_apology(self):
         out = self.brain._strip_dirty_sentences(
-            "You're right — I need to actually complete that item. Call Clint at 5:45pm is what's left.")
-        self.assertEqual(out, "Call Clint at 5:45pm is what's left.")
+            "You're right — I need to actually complete that item. Call Dana at 5:45pm is what's left.")
+        self.assertEqual(out, "Call Dana at 5:45pm is what's left.")
 
     def test_keeps_bulleted_lists(self):
         out = self.brain._strip_dirty_sentences(
-            "My mistake.\n- Call Clint at 5:45pm\n- Get groceries")
-        self.assertIn("Call Clint at 5:45pm", out)
+            "My mistake.\n- Call Dana at 5:45pm\n- Get groceries")
+        self.assertIn("Call Dana at 5:45pm", out)
         self.assertIn("Get groceries", out)
         self.assertNotIn("My mistake", out)
 
@@ -1194,7 +1194,7 @@ class TestStripDirtySentences(unittest.TestCase):
             self.brain._strip_dirty_sentences("You're right — I need to actually complete that item."), "")
 
     def test_leaves_clean_text_untouched(self):
-        clean = "Call Clint at 5:45pm is the only thing left today."
+        clean = "Call Dana at 5:45pm is the only thing left today."
         self.assertEqual(self.brain._strip_dirty_sentences(clean), clean)
 
 
@@ -1230,7 +1230,7 @@ class TestAnswerCompletenessNet(unittest.TestCase):
                 self.assertIsNone(self.brain.WHATS_LEFT_RE.search(text))
 
     def test_omitted_overdue_items_are_detected(self):
-        memory.add_item("Take Wednesday the 19th and Saturday the 22nd in Workday",
+        memory.add_item("Request Aug 19 and Aug 22 off in the PTO portal",
                         due_at=iso(self.now - timedelta(days=1)))
         memory.add_item("Use Fable to get AIssistant SAFELY public on GitHub and LinkedIn",
                         due_at=iso(self.now - timedelta(days=1)))
@@ -1241,32 +1241,32 @@ class TestAnswerCompletenessNet(unittest.TestCase):
         omitted = self.brain._missing_from_answer(reply, due)
         titles = [i["title"] for i in omitted]
         self.assertEqual(len(omitted), 2)
-        self.assertTrue(any("Workday" in t for t in titles))
+        self.assertTrue(any("PTO portal" in t for t in titles))
         self.assertTrue(any("AIssistant" in t for t in titles))
 
     def test_a_paraphrased_mention_counts_as_mentioned(self):
         """The model shortens titles; the net must not claim a false omission."""
         self.assertTrue(self.brain._title_is_mentioned(
-            "Rework resume for Clint", "Rework resume at 7:26pm and pushups are left."))
+            "Rework resume for Dana", "Rework resume at 7:26pm and pushups are left."))
         self.assertTrue(self.brain._title_is_mentioned(
-            "Take Wednesday the 19th and Saturday the 22nd in Workday",
-            "the Workday request for Wednesday the 19th and Saturday the 22nd"))
+            "Request Aug 19 and Aug 22 off in the PTO portal",
+            "the PTO portal request for Wednesday the 19th and Saturday the 22nd"))
 
     def test_an_unmentioned_item_is_not_falsely_matched(self):
         self.assertFalse(self.brain._title_is_mentioned(
-            "Talk to Kyra's dad about Sieman's", "Pushups by 11:59pm is all that's left today."))
+            "Talk to Riley's dad about the referral", "Pushups by 11:59pm is all that's left today."))
 
     def test_a_complete_answer_gets_nothing_appended(self):
         memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
-        memory.add_item("Call Clint", due_at=iso(self.now.replace(hour=17, minute=45)))
+        memory.add_item("Call Dana", due_at=iso(self.now.replace(hour=17, minute=45)))
         import scheduler
         due, _ = scheduler.digest_buckets(memory.open_items(), self.now)
         self.assertEqual(
-            self.brain._missing_from_answer("Call Clint at 5:45pm and Pushups tonight.", due), [])
+            self.brain._missing_from_answer("Call Dana at 5:45pm and Pushups tonight.", due), [])
 
     def test_the_net_appends_omissions_to_the_real_reply(self):
         memory.set_setting("owner_chat_id", "12345")
-        memory.add_item("Talk to Kyra's dad about Sieman's", due_at=iso(self.now.replace(hour=9)))
+        memory.add_item("Talk to Riley's dad about the referral", due_at=iso(self.now.replace(hour=9)))
         memory.add_item("Pushups", due_at=iso(self.now.replace(hour=23, minute=59)))
         script = _Script(text_resp("Pushups by 11:59pm is all that's left today."))
         orig_create, orig_judge = self.brain.client.messages.create, self.brain.llm_claims_change
@@ -1278,7 +1278,7 @@ class TestAnswerCompletenessNet(unittest.TestCase):
             self.brain.client.messages.create = orig_create
             self.brain.llm_claims_change = orig_judge
         self.assertIn("Also still on today", reply)
-        self.assertIn("Kyra", reply)
+        self.assertIn("Riley", reply)
 
     def test_an_item_completed_this_turn_is_not_resurrected_by_the_net(self):
         """The net runs after the tools settle, so "I did X, what's left?" must
@@ -1303,13 +1303,13 @@ class TestAnswerCompletenessNet(unittest.TestCase):
         self.assertEqual(memory.get_item(groceries)["status"], "done")
 
     def test_a_shared_name_alone_is_not_a_match(self):
-        """Caught in the live replay: with a 60% word threshold "Call Clint"
-        scored as mentioned purely because "Clint" appeared in a DIFFERENT
+        """Caught in the live replay: with a 60% word threshold "Call Dana"
+        scored as mentioned purely because "Dana" appeared in a DIFFERENT
         item's title, so a genuinely omitted item was reported as covered.
         Two shared words is a match; one shared name is a coincidence."""
-        reply = "Rework resume for Clint at 7:26pm and pushups tonight are what's left."
-        self.assertFalse(self.brain._title_is_mentioned("Call Clint", reply))
-        self.assertTrue(self.brain._title_is_mentioned("Rework resume for Clint", reply))
+        reply = "Rework resume for Dana at 7:26pm and pushups tonight are what's left."
+        self.assertFalse(self.brain._title_is_mentioned("Call Dana", reply))
+        self.assertTrue(self.brain._title_is_mentioned("Rework resume for Dana", reply))
 
     def test_short_titles_need_every_word(self):
         self.assertFalse(self.brain._title_is_mentioned("Get groceries", "Get the car washed."))

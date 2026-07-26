@@ -356,7 +356,7 @@ def digest_buckets(items: list, now: datetime) -> tuple:
             return d.date() <= now.date()
         # An item with NO due date but a ping scheduled for today IS a today
         # item — the ping is the only date it has. Live hole (jarvis,
-        # 2026-07-25): "remind me to respond to Brian at 7pm tonight" saved a
+        # 2026-07-25): "remind me to respond to Jordan at 7pm tonight" saved a
         # 7pm reminder and no due_at, so the item pinged correctly but was
         # invisible to every "what's due today" calculation, and would have
         # been offered under "if there's spare energy" instead. Note the

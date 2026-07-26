@@ -101,7 +101,7 @@ for one person: your owner. {OWNER_FRAME} You are a dependable tool {_S} can tru
 
 CAPTURE: Save every task, errand, order, plan, appointment, or worry {_S} mentions (capture_item) — a rambling \
 paragraph may hold six items; capture all six. Confirm in one compact line ("Got it: Costco order, text Sam, \
-REVOLVE return."); bullets only for 5+ items. Never capture silently; never claim something saved that wasn't. \
+store return."); bullets only for 5+ items. Never capture silently; never claim something saved that wasn't. \
 capture_item has NO timing restriction and NO content restriction — "don't let me forget X" for something \
 happening in the next five minutes is still capture_item (due_at/remind_at are optional; omit them for something \
 with no specific time), and this applies just as much to a physical item to grab ("AirPods", "the charger") as to \
@@ -134,7 +134,7 @@ whole message if {_S} doesn't reply (live: three asks lost that way on 2026-07-2
 When one message becomes several items, do NOT give them all the same due time just because they arrived together — \
 stagger them into a workable sequence, or leave the flexible ones undated; two items you stacked at 9am become a \
 "conflict" you then warn {_O} about, which is noise you manufactured. Real incident (2026-07-19, jarvis): asked to reset a pushup count \
-and set a reminder, the model also silently called complete_item on "Take clubs out of car" — an item the message \
+and set a reminder, the model also silently called complete_item on "Take the gym bag out of the car" — an item the message \
 never referenced at all, apparently pattern-matched from an unrelated "car"-adjacent item completed the day \
 before. complete_item/update_item must ONLY ever target an item {_S} explicitly named or unambiguously referred to \
 in THIS message — never an item that merely shares a word, a category, or general topic with something mentioned \
@@ -158,7 +158,7 @@ target number was reached when it wasn't.
 
 SPEAK: 1-3 short, complete, natural sentences ("I'll remind you tonight at 7:30" — never "pinged tonight", \
 never a bare "Done."). Every confirmation names what changed. ONE MESSAGE, EVERY PART: {_S} routinely sends an \
-action and a question together ("Planta dinner was last night, you can complete it. What else is on tap for me \
+action and a question together ("bistro dinner was last night, you can complete it. What else is on tap for me \
 today?"). Make the tool call(s) FIRST — actually emit them, never write a reply that merely sounds like you did — \
 then answer the question in the same reply. Answering the question while forgetting the tool call, or confirming \
 the action while silently dropping the question, are both failures; three live turns on 2026-07-25 got the action \
@@ -172,7 +172,7 @@ completed. Never phrase a successful completion as "you're right" or "I need to 
 only to a genuine do-over, never to a normal confirmed completion.
 
 CALM CORRECTLY: Name a feeling once, plainly, then go concrete — never "don't worry" / "breathe easy" / \
-"you're all set"; blanket reassurance feeds the anxiety loop. Overwhelmed → exactly ONE next action anchored to \
+"you're all set"; blanket reassurance feeds the very loop it is meant to calm. Overwhelmed → exactly ONE next action anchored to \
 a moment ("after work, text Sam"). Re-asked "did you save it?" → confirm once, briefly. Decisions → 2-3 plain \
 sentences of trade-off, then ONE recommendation. Never shame overdue items: reschedule, shrink, or drop guilt-free.
 
@@ -451,7 +451,7 @@ def _reject_past_times(inp: dict, keys: tuple) -> str | None:
     error message for the model, or None if every given time is fine.
 
     Live incident (jarvis, 2026-07-24 4:18pm): "remind me in an hour to take
-    Wednesday the 19th and Saturday the 22nd in Workday" was saved with a
+    Wednesday the 19th and Saturday the 22nd in PTO portal" was saved with a
     due_at of 1:18pm THE SAME DAY — three hours in the PAST. The scheduler
     correctly saw an already-overdue item and fired instantly, then nudged
     every 30 minutes: 6 pings in 2 hours for one task, a quarter of that
@@ -488,7 +488,7 @@ def _describe_update(inp: dict) -> str:
     """Turns an update_item payload into a plain-English tail for the `did`
     record ('updated "dinner" (due Sunday, July 26 at 7:15 PM)').
 
-    A bare 'Done — updated "dinner reservation at planta queen"' went out live
+    A bare 'Done — updated "dinner reservation at the bistro"' went out live
     on 2026-07-22 for a change that turned out to have written the WRONG date
     — a confirmation that names no value is a confirmation the owner cannot
     check. Naming the new value is what makes a wrong one catchable."""
@@ -682,10 +682,10 @@ def _agenda_text(items: list) -> str:
     """"What's left today" answered by CODE, not by model recall.
 
     Live failure (jarvis, 2026-07-25 5:22pm): asked "what else is on tap for me
-    today?" the reply was "Call Clint at 5:45pm." — one item out of SIX that
+    today?" the reply was "Call Dana at 5:45pm." — one item out of SIX that
     were genuinely open and dated today or earlier (groceries, the AIssistant
-    public post, the Workday request, Kyra's dad, Clint, pushups). He'd also
-    just said he'd responded to Brian, which was never checked off, so it was
+    public post, the PTO portal request, Riley's dad, Dana, pushups). He'd also
+    just said he'd responded to Jordan, which was never checked off, so it was
     missing from both the answer AND the completion.
 
     The cause is the same one the smart digest already hit and fixed: the open-
@@ -932,7 +932,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         return ""
 
     # A message that mixes an action with a question is the single most common
-    # shape he sends ("Planta dinner was last night, you can complete it. What
+    # shape he sends ("bistro dinner was last night, you can complete it. What
     # else is on tap for me today?"), and it is the shape every guard path
     # historically mangled — see _ANSWER_BOTH_CLAUSE.
     asked_question = _asks_a_question(user_text)
@@ -983,7 +983,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             if replacement:
                 # Keep whatever ELSE the retry said. Substituting the bare
                 # confirmation wholesale is what silently ate his questions:
-                # on 2026-07-25 5:22pm "Planta dinner was last night, you can
+                # on 2026-07-25 5:22pm "bistro dinner was last night, you can
                 # complete it. What else is on tap for me today?" produced a
                 # first draft that both confirmed AND answered — but with no
                 # tool call, so the guard fired, the retry made the real call
@@ -1057,9 +1057,9 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
         # The "nothing actually needed fixing" escape hatch was added on
         # 2026-07-16 for a real case (a diagnostic question whose accurate
         # answer tripped the guard) and then got abused on 2026-07-25: given
-        # "Responded to Brian, you can complete that. Whats left today?" the
+        # "Responded to Jordan, you can complete that. Whats left today?" the
         # model took the escape hatch, concluded he'd only asked a question,
-        # completed nothing, and the Brian item is still open. Whether the
+        # completed nothing, and the Jordan item is still open. Whether the
         # message contains an actual ask is something CODE can tell, so the
         # hatch is now only offered when there genuinely isn't one.
         asked_for_action = bool(CAPTURE_INTENT_RE.search(user_text))
@@ -1099,7 +1099,7 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
             # Neutral on purpose: this path fires both when she asked for a
             # change (resending is the right ask) AND when she's asking a
             # plain diagnostic question about something already wrong (real
-            # incident, 2026-07-19: "why did you mark the car clubs done?" —
+            # incident, 2026-07-19: "why did you mark the gym bag done?" —
             # "mind sending it again?" made no sense as a reply to a question,
             # nothing to resend). Don't presume which one this is.
             text = "Something's not adding up between what I said and what's actually saved — let me know how you'd like this handled."
@@ -1108,12 +1108,12 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     # when ZERO tools succeeded. A turn that does three real things and
     # fabricates a fourth sails straight past it, and two of those shipped live:
     #
-    #   - jarvis, 2026-07-19: asked for a Brian reminder and a pushup reset, it
-    #     did both, then added "and marked the car clubs done" — an item the
+    #   - jarvis, 2026-07-19: asked for a Jordan reminder and a pushup reset, it
+    #     did both, then added "and marked the gym bag done" — an item the
     #     message never mentioned and complete_item was never called on.
-    #   - penny, 2026-07-24: "REVOLVE return and movie night checked off. I'll
-    #     ping you tomorrow morning at 8 AM about the Nespresso order." Both
-    #     check-offs were real; the Nespresso reschedule never happened, and
+    #   - penny, 2026-07-24: "store return and the show checked off. I'll
+    #     ping you tomorrow morning at 8 AM about the coffee pod order." Both
+    #     check-offs were real; the coffee pods reschedule never happened, and
     #     that item's due date is still the one from six days earlier.
     #
     # Both are the same shape: a claim of a KIND of action no tool of that kind
@@ -1146,11 +1146,11 @@ def respond(user_text: str, image_b64: str = None, image_media_type: str = "imag
     # Asked-a-question-and-saved-nothing check: one clarifying question is
     # allowed, but it must not swallow the parts of the message that were
     # perfectly clear. Live (penny, 2026-07-22 9:02pm) one message said "I
-    # already returned the Revolve package but remind me next week to check if
-    # I got a refund... and remind me tomorrow to order more Nespresso or
+    # already returned the store package but remind me next week to check if
+    # I got a refund... and remind me tomorrow to order more coffee pods or
     # remind me on Friday as well." Penny asked which day she meant and saved
     # NOTHING, completed NOTHING. She never answered, so the refund reminder
-    # has never existed, and the REVOLVE item kept being listed as due for two
+    # has never existed, and the the store item kept being listed as due for two
     # more days until she asked a second time. An unanswered question is a
     # silent data-loss path; banking the unambiguous parts first makes it safe.
     if text and not captured and not did and "?" in text and CAPTURE_INTENT_RE.search(user_text):
@@ -1220,7 +1220,7 @@ CLAIM_PATTERN = (
     r"dropped the|saved that|\bgot it\b|\bnoted\b|"
     # "Done — X" / "Done: X" / "Done, X" is this assistant's single most common
     # confirmation phrasing and was somehow never in this pattern. The 2026-07-25
-    # 5:22pm incident ("Done — Planta Queen dinner.") only got caught because the
+    # 5:22pm incident ("Done — the bistro dinner.") only got caught because the
     # PAID llm_claims_change judge ran as the second layer — the free regex layer
     # missed it, which means every "Done —" empty promise was costing a model call
     # to detect and would have shipped uncaught if that judge had failed open.
@@ -1301,7 +1301,7 @@ _STOPWORDS = frozenset(
 
 def _title_is_mentioned(title: str, reply: str) -> bool:
     """Fuzzy: does the reply appear to name this item? The model paraphrases
-    ("Rework resume for Clint" -> "rework resume"), so exact matching would
+    ("Rework resume for Dana" -> "rework resume"), so exact matching would
     report false omissions. Requires most of the title's distinctive words."""
     low = reply.lower()
     if title.lower() in low:
@@ -1312,8 +1312,8 @@ def _title_is_mentioned(title: str, reply: str) -> bool:
         return title.lower()[:12] in low
     hits = sum(1 for w in words if w in low)
     # Short titles need EVERY word. Caught in the live replay: with a 60%
-    # threshold, "Call Clint" counted as mentioned purely because "Clint"
-    # appeared in a different item ("Rework resume for Clint"), so a genuinely
+    # threshold, "Call Dana" counted as mentioned purely because "Dana"
+    # appeared in a different item ("Rework resume for Dana"), so a genuinely
     # omitted item was scored as covered. Two shared words is a match; one
     # shared name is a coincidence.
     need = len(words) if len(words) <= 2 else max(2, round(len(words) * 0.6))
@@ -1341,7 +1341,7 @@ def _asks_a_question(text: str) -> bool:
     """Does the owner's message contain a question needing an answer?
 
     Gates the "answer both halves" clause below. A message that mixes an action
-    with a question — "Planta dinner was last night, you can complete it. What
+    with a question — "bistro dinner was last night, you can complete it. What
     else is on tap for me today?" — is the most common shape he sends and the
     one every guard path used to mangle, because each guard was built to make an
     ACTION correct and none of them knew a question was also outstanding."""
@@ -1412,8 +1412,8 @@ CAPTURE_INTENT_RE = re.compile(
     r"complete the|i'?ve (?:done|finished)|keep reminding me|continue to remind me|"
     # How he actually phrases a check-off, from the live transcripts: "you can
     # complete that for the day", "so you can complete that", "you can check
-    # out Revolve, check off...". Missing these is what let the guard decide
-    # "Responded to Brian, you can complete that. Whats left today?" contained
+    # out the store, check off...". Missing these is what let the guard decide
+    # "Responded to Jordan, you can complete that. Whats left today?" contained
     # no ask at all, take the escape hatch, and lose the completion.
     r"you can (?:complete|check|mark|cross|close|drop)|"
     r"\b(?:done with|finished with)\b|^(?:done|completed|finished)\b",

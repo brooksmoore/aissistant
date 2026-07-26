@@ -57,6 +57,33 @@ def tracked_files() -> list[str]:
     return [f for f in out.stdout.splitlines() if f.strip()]
 
 
+def offending_commits(token_re: re.Pattern) -> list[str]:
+    """Commit MESSAGES carrying personal content — the exposure a file scan
+    cannot see and a file edit cannot fix.
+
+    Scrubbing the working tree makes this gate green while the same names sit in
+    every commit message in the history, and publishing a repo publishes its
+    history. Nothing about `git rm` or an edit touches that. The only real fixes
+    are to publish as a fresh repo with one squashed initial commit (free while
+    the repo is still private) or to rewrite history (breaks every clone). So
+    this check reports rather than blocks: it prints the count and the guidance,
+    and leaves the publish decision informed instead of falsely reassured."""
+    out = subprocess.run(
+        ["git", "log", "--all", "--format=%H%x1f%s%x1f%b%x1e"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    hits = []
+    for record in out.stdout.split("\x1e"):
+        if not record.strip():
+            continue
+        parts = record.strip().split("\x1f")
+        sha, subject = parts[0], (parts[1] if len(parts) > 1 else "")
+        body = parts[2] if len(parts) > 2 else ""
+        if token_re.search(subject) or token_re.search(body):
+            hits.append(f"{sha[:8]} {subject[:72]}")
+    return hits
+
+
 def main() -> int:
     files = tracked_files()
     problems: list[str] = []
@@ -67,7 +94,16 @@ def main() -> int:
                 problems.append(f"TRACKED USER DATA: {f} (must never be in git)")
 
     token_re = re.compile("|".join(PERSONAL_TOKENS))
+    # This file necessarily CONTAINS every pattern it searches for — the denylist
+    # above and the comments explaining why each entry exists. Scanning itself
+    # produces guaranteed false positives that can only be silenced by weakening
+    # the denylist, which is the one thing this gate must never do. Exempt this
+    # single path by exact name (not a glob, not a directory) so nothing else can
+    # hide behind it.
+    SELF = "tools/check_publishable.py"
     for f in files:
+        if f == SELF:
+            continue
         p = ROOT / f
         try:
             text = p.read_text(encoding="utf-8", errors="ignore")
@@ -80,6 +116,8 @@ def main() -> int:
                 if pat.search(line):
                     problems.append(f"SENSITIVE FRAMING: {f}:{i}: {line.strip()[:100]}")
 
+    history = offending_commits(token_re)
+
     if problems:
         print(f"NOT PUBLISHABLE — {len(problems)} finding(s):\n")
         for pr in problems[:60]:
@@ -90,10 +128,30 @@ def main() -> int:
             "\nUser transcripts and anything derived from them stay private. "
             "Scrub to fixtures that are not real people, then re-run."
         )
+        _report_history(history)
         return 1
 
-    print("publishable: no tracked user data, no personal content, no sensitive framing")
+    print("working tree: no tracked user data, no personal content, no sensitive framing")
+    _report_history(history)
+    if history:
+        print("\n=> A CLEAN WORKING TREE IS NOT A CLEAN REPO. Publishing publishes the history.")
+        return 1
+    print("publishable.")
     return 0
+
+
+def _report_history(history: list[str]) -> None:
+    if not history:
+        print("history: no personal content in any commit message")
+        return
+    print(f"\nHISTORY: {len(history)} commit message(s) carry personal content — "
+          "a file scan cannot see this and an edit cannot fix it:")
+    for line in history[:10]:
+        print("  " + line)
+    if len(history) > 10:
+        print(f"  ... and {len(history) - 10} more")
+    print("  FIX: publish as a fresh repo with ONE squashed initial commit (free while this\n"
+          "       repo is private), or rewrite history (breaks every existing clone).")
 
 
 if __name__ == "__main__":

@@ -383,7 +383,7 @@ def due_nags(now: datetime, grace_minutes_fn=None) -> list:
             # EVERY on-time reminder got a follow-up nag a few minutes later
             # regardless of priority, since the flat grace ran out on the
             # very next check after it elapsed. Confirmed live (2026-07-18,
-            # jarvis): "Reminder: Take clubs out of car" at 6:00, "Nudge #1"
+            # jarvis): "Reminder: Take the gym bag out of the car" at 6:00, "Nudge #1"
             # at 6:05 — technically a different tick than the original 60-
             # second collision, but the same unwanted double-ping. If a
             # scheduled reminder already fired for this item, the first nag
