@@ -95,7 +95,7 @@ Unlocks calendar editing, the calendar section of the morning digest, and inbox 
 ## Tests
 
 ```bash
-bash run_tests.sh          # 222 unit tests, zero API cost, ~3 seconds
+bash run_tests.sh          # full unit suite, zero API cost, ~3 seconds
 bash run_tests.sh --live   # 35 checks against the real model, budget-capped, ~$0.10
 ```
 
