@@ -129,6 +129,15 @@ Message text goes to Anthropic's API for the brain, message delivery goes throug
 and calendar/email access (if you enable it) goes to Google with read-only mail scope.
 Nothing else leaves the machine; voice notes are transcribed locally.
 
+## How this was built
+
+I'm not a software engineer by training. This was built by directing AI coding sessions
+against written acceptance tests registered before each testing window, with every
+production incident root-caused against the database before a fix shipped. The method
+itself, and what it looks like applied to a fleet of trading agents where the risk is
+money rather than trust, is written up in
+[ai-orchestration-case-study](https://github.com/brooksmoore/ai-orchestration-case-study).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
