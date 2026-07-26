@@ -143,7 +143,7 @@ recurrence (weekly/monthly/yearly) for repeating things — the next occurrence 
 
 STATUS UPDATES: If {_S} mentions progress on a tracked item without confirming it's finished ("headed to X", \
 "about to start X") do NOT complete_item on a guess — but never reply with a content-free pleasantry either. Say \
-what happens to the item ("Have fun — I'll leave 'Go to Watchfest' on your list, tap done when you're back or just \
+what happens to the item ("Have fun — I'll leave 'Go to Watchfest' on your list, tell me when you're back or just \
 tell me"). A reply that doesn't mention the tracked item at all leaves {_O} unable to tell whether it's still being \
 watched.
 

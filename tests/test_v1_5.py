@@ -339,23 +339,23 @@ class TestBundlingAndPingBudget(unittest.TestCase):
         rows = memory.recent_msgs(5)
         self.assertTrue(any(r["content"].startswith("[reminder]") for r in rows))
 
-    def test_bundle_gives_each_item_its_own_full_button_row(self):
-        # a bundle must stay one message/one notification, but each item still
-        # gets real actions (Done/+1h/Tomorrow) instead of a bare checkmark —
-        # what you can do with a reminder shouldn't depend on how many fired
-        # at the same minute
+    def test_bundle_names_every_item_and_carries_no_buttons(self):
+        """Supersedes an earlier version of this test that asserted one full
+        Done/+1h/Tomorrow row per item. That design was correct about actions
+        and wrong about legibility: Telegram gives a row no label, so three
+        identical rows under three numbered lines could only be read by
+        counting. Buttons moved to v2's iOS client (BUTTONS_ARE_V2 in
+        scheduler.py). The bundle must still be ONE message — one notification
+        was always the point — and must still name every item in its text."""
         self._due_item("thing one")
         self._due_item("thing two")
         ctx = FakeContext()
         run(self.scheduler.check_reminders(ctx))
-        self.assertEqual(len(ctx.bot.sent), 1)
-        rows = ctx.bot.sent[0]["reply_markup"].inline_keyboard
-        self.assertEqual(len(rows), 2)  # one row per item
-        for row in rows:
-            labels = [b.text for b in row]
-            self.assertIn("✅ Done", labels)
-            self.assertIn("⏰ +1h", labels)
-            self.assertIn("🌙 Tomorrow", labels)
+        self.assertEqual(len(ctx.bot.sent), 1, "still one message, one notification")
+        sent = ctx.bot.sent[0]
+        self.assertIsNone(sent.get("reply_markup"), "Telegram sends are buttonless")
+        self.assertIn("thing one", sent["text"])
+        self.assertIn("thing two", sent["text"])
 
 
 class TestEventCategoryButtons(unittest.TestCase):
@@ -486,7 +486,7 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
         self.assertNotIn(pinged, due_ids)     # already pinged on time — full 6h escalation grace applies
         self.assertIn(never_pinged, due_ids)  # never pinged at all — short flat grace still applies
 
-    def test_stale_item_appears_in_morning_digest_with_buttons(self):
+    def test_stale_item_appears_in_morning_digest_and_names_itself(self):
         now = datetime.now(config.TZ)
         long_past = (now - timedelta(hours=30)).isoformat(timespec="seconds")
         memory.add_item("fell out of the nag chain", due_at=long_past, priority=3)
@@ -496,7 +496,11 @@ class TestNagCutoffAndStaleSweep(unittest.TestCase):
         self.assertEqual(len(ctx.bot.sent), 2)
         stale_msg = ctx.bot.sent[1]
         self.assertIn("came and went", stale_msg["text"])
-        self.assertIsNotNone(stale_msg["reply_markup"])
+        # buttonless now (BUTTONS_ARE_V2): the item titles used to live only
+        # inside the button labels, so the message body said nothing at all on
+        # a lock screen. The text has to carry them.
+        self.assertIsNone(stale_msg.get("reply_markup"))
+        self.assertIn("fell out of the nag chain", stale_msg["text"])
 
     def test_max_nags_default_is_five(self):
         self.assertEqual(self.scheduler.MAX_NAGS, 5)

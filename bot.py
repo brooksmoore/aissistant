@@ -80,7 +80,7 @@ Commands (optional — talking works for everything):
 /list — your checklist with ✓ buttons
 /help — this message
 
-I send a morning game-plan at {MORNING_DIGEST} and an evening check-in at {EVENING_DIGEST}. Reminders keep nudging until you tap ✅ Done — that's the point 😌"""
+I send a morning game-plan at {MORNING_DIGEST} and an evening check-in at {EVENING_DIGEST}. Reminders keep nudging until you tell me it's done — just say "done with the groceries" 😌"""
 
 
 # A bare acknowledgment ("thanks", "ok", "got it", a thumbs-up) needs no brain
@@ -132,7 +132,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     items = memory.open_items()
     await update.message.reply_text(
-        scheduler.render_list(items), reply_markup=scheduler.checklist_markup(items)
+        scheduler.render_list(items)
     )
 
 
@@ -170,7 +170,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.lower() in ("list", "my list", "show my list", "what's on my list", "whats on my list"):
         items = memory.open_items()
         await update.message.reply_text(
-            scheduler.render_list(items), reply_markup=scheduler.checklist_markup(items)
+            scheduler.render_list(items)
         )
         return
 

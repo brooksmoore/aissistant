@@ -182,7 +182,7 @@ async def poll(context):
             icon = deco_icon("🚨").strip()
             lead = f"{icon} " if icon else ""
             text = f"{lead}Email from {sender}: {e['summary']}\n\nI put it on your list — check it off when you've replied."
-            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=item_buttons(item_id))
+            await context.bot.send_message(chat_id=chat_id, text=text)
             memory.log_msg("assistant", f"[email] {text}")
             memory.bump_counter("pings", 1)
     if deliveries and not quiet:

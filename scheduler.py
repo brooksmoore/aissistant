@@ -23,13 +23,35 @@ from config import EVENING_DIGEST, MORNING_DIGEST, QUIET_END_HOUR, QUIET_START_H
 
 log = logging.getLogger("penny.scheduler")
 
+# BUTTONS_ARE_V2 (decision, 2026-07-25, Brooks): Telegram sends carry NO inline
+# keyboards. Do not add them back here — take this to the iOS client instead.
+#
+# Why: Telegram gives a keyboard row no label and no visual tie to any line of
+# message text, so a bundled reminder ("3 things need you right now") rendered as
+# three identical [✅ Done][⏰ +1h][🌙 Tomorrow] rows, and the only way to know
+# which row was item 2 was to count rows and trust the order matched. 28% of
+# reminders were bundles (29 of 102 over two weeks), so this was an everyday
+# problem, not an edge case. Numbering the buttons would have made it legible but
+# left a 9-to-15 button wall on every bundle, which is its own kind of pressure
+# on someone already behind on the list.
+#
+# Words already carry every action a button did, unambiguously and without
+# counting ("done with the gym bag", "push pushups to tomorrow"), and that is how
+# both owners overwhelmingly act anyway. The tradeoff accepted: a check-off now
+# costs one Haiku turn (~$0.002) where a tap was free — a few cents a month
+# against a $0.20/day breaker.
+#
+# The callback handlers in bot.py stay LIVE on purpose: messages already sitting
+# in the chat history still have working buttons, and tapping one should still do
+# the right thing rather than silently fail.
+
 # minutes between repeat nags, by priority (0 = remind once, then digests only)
 ESCALATION_MIN = {5: 30, 4: 120, 3: 360, 2: 1440, 1: 0}
 MAX_NAGS = 5  # after this many pings, fall back to digests only (was 12 — the flood's biggest lever)
 NAG_WINDOW_HOURS = 24  # a nag chain stops chasing this long past due_at; item falls to the stale sweep instead
 DAILY_PING_CAP = 10  # soft cap on proactive sends/day; scheduled (one-shot) reminders and P5 are always exempt
 SPARE_ENERGY_SHOWN = 3   # how many undated backlog items a digest offers (rotated — see digest_buckets)
-BUNDLE_ROWS_SHOWN = 5    # items given their own button row in one bundle; the rest are named in a tail line
+BUNDLE_ROWS_SHOWN = 5    # items listed individually in one bundle; the rest are named in a tail line
 STALE_SWEEP_COOLDOWN_DAYS = 3  # how long before the same expired item may be swept again
 
 # She can change all of this by just asking Penny — stored as pref_* settings.
@@ -142,7 +164,7 @@ def render_list(items) -> str:
         return f"Your list is empty. Nothing is waiting on you right now{' ' + tail if tail else ''}"
     flame = {5: "🔴", 4: "🟠", 3: "🟡", 2: "🟢", 1: "⚪️"}
     header = icon("📋").strip()
-    lines = [f"{header + ' ' if header else ''}Your list (tap ✓ to check off):", ""]
+    lines = [f"{header + ' ' if header else ''}Your list — say \"done with #3\" or name it:", ""]
     now = datetime.now(TZ)
     warn = icon("⚠️")
     for idx, it in enumerate(items, 1):
@@ -269,10 +291,8 @@ async def check_reminders(context):
 async def _send_single(context, chat_id, entry: dict, show_overdue: bool):
     it = entry["item"]
     text = _reminder_text(entry, show_overdue)
-    # the mute button only makes sense on a repeating nag — a scheduled
-    # reminder is a one-shot moment she asked for, nothing to mute yet
-    markup = item_buttons(it["id"], it["category"], mute=(entry["kind"] == "nag" and it["remind_count"] >= 1))
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    # No inline keyboard — see BUTTONS_ARE_V2 at the top of this module.
+    await context.bot.send_message(chat_id=chat_id, text=text)
     log_proactive("reminder", text)
     bump_pings(1)
 
@@ -293,15 +313,10 @@ async def _send_bundle(context, chat_id, entries: list, show_overdue: bool):
         lines.append("Also waiting: " + ", ".join(e["item"]["title"] for e in overflow)
                      + " — say \"list\" to work through these.")
     text = "\n".join(lines)
-    # one message, one notification (the whole point of bundling) — but a full
-    # Done/+1h/Tomorrow row per item instead of a bare checkmark, so what you
-    # can do with a reminder doesn't depend on how many fired at once
-    rows = [
-        item_button_row(e["item"]["id"], e["item"]["category"], mute=(e["kind"] == "nag" and e["item"]["remind_count"] >= 1))
-        for e in shown
-    ]
-    markup = InlineKeyboardMarkup(rows)
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    # one message, one notification (the whole point of bundling). No inline
+    # keyboard — this send site is the reason buttons are gone; see
+    # BUTTONS_ARE_V2 at the top of this module.
+    await context.bot.send_message(chat_id=chat_id, text=text)
     log_proactive("reminder", text)
     bump_pings(1)  # one notification event, however many items it covers
 
@@ -509,10 +524,10 @@ async def _stale_sweep(context, chat_id):
     for it in stale:
         d = memory.parse_dt(it["due_at"])
         lines.append(f"  • {it['title']}" + (f" (was due {d.strftime('%b %-d')})" if d else ""))
+    lines.append("\nTell me which to clear or re-time — \"drop the store return\", "
+                 "\"move groceries to tomorrow\".")
     stale_text = "\n".join(lines)
-    await context.bot.send_message(
-        chat_id=chat_id, text=stale_text, reply_markup=checklist_markup(stale, max_buttons=len(stale))
-    )
+    await context.bot.send_message(chat_id=chat_id, text=stale_text)
     log_proactive("digest", stale_text)
     bump_pings(1)
     # record the sweep only after a successful send, so a failed message doesn't

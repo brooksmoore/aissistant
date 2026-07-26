@@ -644,7 +644,9 @@ class TestSpareEnergyRotates(unittest.TestCase):
 class TestBundleIsCapped(unittest.TestCase):
     """8 items with 8 four-button rows went out at 8:00am on 2026-07-25, and 7
     at 3:01pm on 07-21. Bundling to one notification was right; an uncapped
-    wall of buttons became its own kind of flood."""
+    wall of buttons became its own kind of flood. Buttons are gone entirely as
+    of the same day (BUTTONS_ARE_V2 in scheduler.py) — the cap now governs how
+    many items are listed individually before the rest go in a named tail."""
 
     def setUp(self):
         fresh_db()
@@ -652,7 +654,7 @@ class TestBundleIsCapped(unittest.TestCase):
         self.scheduler = scheduler
         memory.set_setting("owner_chat_id", "12345")
 
-    def test_overflow_items_are_named_but_get_no_button_rows(self):
+    def test_overflow_items_are_named_in_the_tail_never_dropped(self):
         entries = []
         for n in range(8):
             i = memory.add_item(f"thing {n}")
@@ -660,22 +662,21 @@ class TestBundleIsCapped(unittest.TestCase):
         ctx = FakeContext()
         run(self.scheduler._send_bundle(ctx, "12345", entries, show_overdue=True))
         sent = ctx.bot.sent[0]
-        self.assertEqual(len(sent["reply_markup"].inline_keyboard),
-                         self.scheduler.BUNDLE_ROWS_SHOWN)
+        self.assertIsNone(sent.get("reply_markup"), "Telegram sends are buttonless")
         self.assertIn("8 things need you right now", sent["text"])
         for n in range(8):
             with self.subTest(n=n):
                 self.assertIn(f"thing {n}", sent["text"], "no item may be silently dropped")
         self.assertIn("Also waiting", sent["text"])
 
-    def test_a_small_bundle_is_unchanged(self):
+    def test_a_small_bundle_has_no_overflow_tail(self):
         entries = []
         for n in range(3):
             i = memory.add_item(f"thing {n}")
             entries.append({"item": memory.get_item(i), "kind": "nag", "reminder_id": None})
         ctx = FakeContext()
         run(self.scheduler._send_bundle(ctx, "12345", entries, show_overdue=True))
-        self.assertEqual(len(ctx.bot.sent[0]["reply_markup"].inline_keyboard), 3)
+        self.assertIsNone(ctx.bot.sent[0].get("reply_markup"))
         self.assertNotIn("Also waiting", ctx.bot.sent[0]["text"])
 
 
@@ -1314,3 +1315,84 @@ class TestAnswerCompletenessNet(unittest.TestCase):
     def test_short_titles_need_every_word(self):
         self.assertFalse(self.brain._title_is_mentioned("Get groceries", "Get the car washed."))
         self.assertTrue(self.brain._title_is_mentioned("Get groceries", "Groceries before you get home."))
+
+
+class TestTelegramIsButtonless(unittest.TestCase):
+    """Decision 2026-07-25 (Brooks): "save buttons for the ios UI in v2.
+    buttonless in telegram, though it was cool and impressive it's just a bit
+    clunky under the circumstances."
+
+    Telegram gives an inline-keyboard row no label and no visual tie to any line
+    of message text, so a bundled reminder was three identical
+    [Done][+1h][Tomorrow] rows under three numbered lines, readable only by
+    counting rows and trusting the order. 28% of reminders were bundles.
+
+    This test exists to stop a future session from helpfully adding them back to
+    one send site at a time. Every OUTBOUND send must be buttonless; the
+    callback handlers stay live so buttons on messages already in the chat
+    history keep working."""
+
+    def setUp(self):
+        fresh_db()
+        import scheduler
+        self.scheduler = scheduler
+        memory.set_setting("owner_chat_id", "12345")
+        # Disable quiet hours for these tests. Without this the suite passes or
+        # fails depending on the clock: run it after 22:00 and check_reminders
+        # correctly suppresses a P3 ping, so "nothing was sent" looks like a
+        # bug in the thing under test. This suite has been bitten by
+        # time-of-day coupling before — pin it.
+        memory.set_setting("pref_quiet_start_hour", "0")
+        memory.set_setting("pref_quiet_end_hour", "0")
+
+    def _all_sends(self, ctx):
+        return ctx.bot.sent
+
+    def test_single_reminder_is_buttonless(self):
+        now = datetime.now(config.TZ)
+        memory.add_item("Take the gym bag out of the car", due_at=iso(now - timedelta(minutes=1)),
+                        remind_at=iso(now - timedelta(minutes=1)))
+        ctx = FakeContext()
+        run(self.scheduler.check_reminders(ctx))
+        self.assertTrue(ctx.bot.sent)
+        for sent in self._all_sends(ctx):
+            self.assertIsNone(sent.get("reply_markup"))
+
+    def test_list_render_is_buttonless_and_says_how_to_act(self):
+        memory.add_item("Order more coffee pods")
+        text = self.scheduler.render_list(memory.open_items())
+        self.assertNotIn("tap", text.lower(), "must not promise a gesture that no longer exists")
+        self.assertIn("Order more coffee pods", text)
+
+    def test_morning_digest_and_stale_sweep_are_buttonless(self):
+        now = datetime.now(config.TZ)
+        memory.add_item("fell out of the nag chain", due_at=iso(now - timedelta(hours=30)))
+        memory.set_setting("pref_digest_style", "plain")
+        ctx = FakeContext()
+        run(self.scheduler.morning_digest(ctx))
+        self.assertTrue(ctx.bot.sent)
+        for sent in self._all_sends(ctx):
+            self.assertIsNone(sent.get("reply_markup"))
+
+    def test_no_send_site_in_the_codebase_attaches_markup(self):
+        """Static check across every module that sends to Telegram. The only
+        legitimate remaining uses are in bot.py's callback handler, which EDITS
+        messages that already carry buttons from before this change."""
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        offenders = []
+        for name in ("scheduler.py", "gmail_watch.py", "maintenance.py", "webhook.py"):
+            for i, line in enumerate((root / name).read_text().splitlines(), 1):
+                if "reply_markup" in line and not line.strip().startswith("#"):
+                    offenders.append(f"{name}:{i}: {line.strip()}")
+        self.assertEqual(offenders, [], "outbound sends must be buttonless")
+
+    def test_callback_handlers_are_still_wired_for_historical_buttons(self):
+        """Messages already in the chat have live buttons. Tapping one must
+        still work rather than silently failing."""
+        import bot
+        self.assertTrue(hasattr(bot, "on_button"))
+        src = (pathlib.Path(bot.__file__).read_text())
+        for action in ('"done"', '"snooze"', '"tmrw"', '"mute"'):
+            with self.subTest(action=action):
+                self.assertIn(action, src)
