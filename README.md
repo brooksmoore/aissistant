@@ -9,7 +9,33 @@ Two people have used it as their daily driver since July 2026. It costs a few ce
 per person to run, and it is covered by 222 unit tests plus a 35-check suite that runs
 against the live model.
 
-<!-- screenshot slot: docs/screenshot_chat.png — a real conversation, personal content scrubbed -->
+A representative exchange (voice memo in, structured commitments out):
+
+```
+You  🎤  "ok brain dump — return the blue dress to nordstrom by friday,
+          rent's due the first of every month, and remind me the night
+          before AND the morning of my dentist thing on the 23rd"
+
+Bot      Got it: Nordstrom return (Friday), rent (monthly, the 1st),
+         dentist on the 23rd — pinging you the night before and that
+         morning.
+
+You      "actually the dentist is the 24th"
+
+Bot      Moved it to Thursday, July 24. Both reminders shifted with it.
+
+         ⏰ Reminder: Return blue dress to Nordstrom (due Fri 5:00 PM)
+         [ ✅ Done ]  [ ⏰ +1h ]  [ 🌙 Tomorrow ]  [ 🔕 ]
+
+You      "way too many notifications today, keep it to 2 or 3"
+
+Bot      Set your daily cap to 3 and switched reminders to gentle pacing.
+```
+
+Every line above maps to a real mechanism: one message becomes four separate
+database rows, a correction rewrites the stored date rather than arguing, and
+"too many notifications" writes two actual preferences — a claim the bot is
+structurally prevented from making unless the write succeeded.
 
 The most interesting part of this repo is not the feature list. It is
 **[ENGINEERING_LOG.md](ENGINEERING_LOG.md)**: twelve production incidents, each with the
