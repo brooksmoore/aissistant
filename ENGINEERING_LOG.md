@@ -237,9 +237,58 @@ a rule that a clarifying question may never swallow a multi-part message — the
 unambiguous parts get saved first, then the question covers only the genuine
 remainder.
 
+## Jul 25 — "What else is on my list?" and the limits of telling a model what to do
+
+Three failures in one afternoon, all from the same shape of message: an action
+and a question together ("that dinner was last night, you can complete it —
+what else is on tap today?").
+
+**First, the answer was a fraction of the list.** Asked what was left, the bot
+named one item out of six genuinely open and dated that day. Cause: the state
+block presented ~30 items as a flat, priority-sorted list of raw ISO
+timestamps, so answering a "today" question meant scanning every line and
+comparing dates by eye. Fixed the way the digest had been fixed earlier: the
+state block now opens with three code-computed buckets (due-today-or-overdue /
+later / undated) built from the same function the digest uses, so a typed
+question and the morning digest cannot disagree. Found while fixing it: an item
+with a reminder today but no due date was invisible to *every* "due today"
+calculation and would have been offered as flexible backlog instead — a ping
+today now counts as today when there is no due date, while a night-before ping
+for a later event correctly does not.
+
+**Second, one guard's fix broke another guard's output.** The empty-promise
+guard fired on a first draft that was actually right on both counts —
+confirmation *and* answer — because it had made no tool call. The retry made the
+real call but replied only with an apology, and the apology-scrubber (shipped
+hours earlier) replaced the whole reply with a deterministic confirmation built
+purely from what the tools did. The action was correct and the question was
+silently dropped. Every guard in the file had been written to make an *action*
+correct; none knew a message might have a second half. Now: corrective notes
+carry an explicit "answer both halves" clause whenever the message contains a
+question, the scrubber removes only the offending sentences instead of the whole
+reply, and if nothing survives while a question is outstanding, one more
+round-trip is spent rather than shipping a half-answer.
+
+**Third, and the lesson worth keeping.** Even *with* the pre-computed bucket in
+the prompt and an explicit rule to read out all of it, a live check against the
+real model showed it naming three of seven — listing only items whose times were
+still ahead and silently dropping every overdue one, which are the items that
+matter most. That was the third instruction in a single day that the model
+simply declined to follow, alongside a weekday lookup table and a
+"never apologize for work that succeeded" rule. So the reply is now *verified*:
+after all tool calls settle, the answer is checked against the bucket and
+anything omitted is appended by code. Confirmed live at eight of eight, with an
+item completed in the same turn never resurrected into the answer.
+
+The generalization now governs the codebase: **when correctness is checkable
+against the database, check it in code and repair the output; reserve prompt
+rules for what code genuinely cannot verify.** Every durable fix in this log is
+on the code side of that line, and most of the repeat incidents were prompt
+rules that had been asked more firmly the second time.
+
 ---
 
-**Where it stands:** 222 unit tests (zero API cost) plus a 35-check live suite
+**Where it stands:** 242 unit tests (zero API cost) plus a 35-check live suite
 against the real model, budget-capped per run. Reliability incidents are
 counted in the database, not remembered in anyone's head. The product runs
 Haiku-only by design, at a few cents per day per user — the interesting
