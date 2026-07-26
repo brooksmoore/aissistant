@@ -239,7 +239,7 @@ remainder.
 
 ---
 
-**Where it stands:** 202 unit tests (zero API cost) plus a 35-check live suite
+**Where it stands:** 222 unit tests (zero API cost) plus a 35-check live suite
 against the real model, budget-capped per run. Reliability incidents are
 counted in the database, not remembered in anyone's head. The product runs
 Haiku-only by design, at a few cents per day per user — the interesting

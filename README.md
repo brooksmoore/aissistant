@@ -6,7 +6,7 @@ I wanted an assistant that actually held the things I said out loud: errands, ap
 "remind me the night before," a running pushup count. Existing to-do apps require you to stop
 and type into forms, so they don't get used. I built one on Telegram with a Claude brain.
 Two people have used it as their daily driver since July 2026. It costs a few cents per day
-per person to run, and it is covered by 202 unit tests plus a 35-check suite that runs
+per person to run, and it is covered by 222 unit tests plus a 35-check suite that runs
 against the live model.
 
 <!-- screenshot slot: docs/screenshot_chat.png — a real conversation, personal content scrubbed -->
@@ -85,7 +85,7 @@ recurring item and spawning its next occurrence is one atomic transaction, tool 
 structured values instead of sniffed strings, and past-dated reminders are rejected at the
 tool boundary because the model once saved "remind me in an hour" three hours in the past.
 
-**Testing.** 202 unit tests run in about three seconds with zero API cost (model calls are
+**Testing.** 222 unit tests run in about three seconds with zero API cost (model calls are
 mocked or bypassed). A separate 35-check live suite runs real conversations against the
 real model on a scratch database, budget-capped per run, and replays past production
 incidents verbatim. Every bug found in production gets a regression test before the fix
