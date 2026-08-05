@@ -101,6 +101,56 @@ class TestRecurrenceTiming(unittest.TestCase):
         d = memory._advance_date(datetime(2028, 2, 29, 9, 0, tzinfo=config.TZ), "yearly")
         self.assertEqual((d.year, d.month, d.day), (2029, 2, 28))
 
+    def test_advance_date_honors_interval(self):
+        """Men's group: weekly + interval=2 must land 14 days out, not 7."""
+        d = memory._advance_date(datetime(2026, 8, 6, 19, 0, tzinfo=config.TZ), "weekly", 2)
+        self.assertEqual((d.year, d.month, d.day), (2026, 8, 20))
+        d3 = memory._advance_date(datetime(2026, 8, 1, 9, 0, tzinfo=config.TZ), "daily", 3)
+        self.assertEqual((d3.year, d3.month, d3.day), (2026, 8, 4))
+
+    def test_advance_date_defaults_to_every_cycle(self):
+        """No interval given (None) must behave exactly like interval=1 — the pre-feature default."""
+        d = memory._advance_date(datetime(2026, 8, 6, 19, 0, tzinfo=config.TZ), "weekly")
+        self.assertEqual((d.year, d.month, d.day), (2026, 8, 13))
+
+    def test_biweekly_respawns_fourteen_days_out_on_completion(self):
+        """Far-future due date so the late-completion catch-up loop in complete_item
+        (which rolls forward until the reminder is in the future) doesn't add extra
+        cycles and mask a wrong interval — see the pre-existing dated-test flakiness
+        in test_daily_rolls_and_respawns_on_completion for why that matters."""
+        i = memory.add_item("Men's Group", due_at="2099-08-13T19:00:00",
+                             recurrence="weekly", recurrence_interval=2)
+        memory.complete_item(i)
+        open_now = memory.open_items()
+        self.assertEqual(len(open_now), 1)
+        self.assertTrue(open_now[0]["due_at"].startswith("2099-08-27"))
+        self.assertEqual(open_now[0]["recurrence_interval"], 2)
+
+    def test_recurrence_interval_survives_update_item(self):
+        i = memory.add_item("Men's Group", due_at="2099-08-13T19:00:00", recurrence="weekly")
+        memory.update_item(i, recurrence="weekly", recurrence_interval=2)
+        memory.complete_item(i)
+        open_now = memory.open_items()
+        self.assertTrue(open_now[0]["due_at"].startswith("2099-08-27"))
+
+    def test_recurrence_interval_rejects_non_positive(self):
+        with self.assertRaises(ValueError):
+            memory.add_item("x", due_at="2026-08-01T09:00:00", recurrence="weekly", recurrence_interval=0)
+        i = memory.add_item("x", due_at="2026-08-01T09:00:00", recurrence="weekly")
+        with self.assertRaises(ValueError):
+            memory.update_item(i, recurrence_interval=-1)
+
+    def test_turning_recurrence_off_clears_interval_in_brain_layer(self):
+        """brain._run_tool maps recurrence='none' -> None; it must also clear
+        recurrence_interval so a stale gap doesn't silently reappear if recurrence
+        is turned back on later without specifying a fresh interval."""
+        import brain
+        i = memory.add_item("x", due_at="2099-08-01T09:00:00", recurrence="weekly", recurrence_interval=2)
+        brain._run_tool("update_item", {"item_id": i, "recurrence": "none"})
+        row = memory.get_item(i)
+        self.assertIsNone(row["recurrence"])
+        self.assertIsNone(row["recurrence_interval"])
+
     def test_reminder_lead_time_preserved(self):
         i = memory.add_item("Renew registration", due_at="2026-08-10T17:00:00",
                             remind_at="2026-08-08T09:00:00", recurrence="monthly")

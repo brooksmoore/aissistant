@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS items (
     recurrence_until TEXT,
     reminder_text TEXT,
     progress_current INTEGER,
-    progress_target INTEGER
+    progress_target INTEGER,
+    recurrence_interval INTEGER
 );
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +87,8 @@ def init():
             con.execute("ALTER TABLE items ADD COLUMN progress_current INTEGER")
         if "progress_target" not in cols:
             con.execute("ALTER TABLE items ADD COLUMN progress_target INTEGER")
+        if "recurrence_interval" not in cols:
+            con.execute("ALTER TABLE items ADD COLUMN recurrence_interval INTEGER")
     _migrate_reminders_table()
 
 
@@ -137,10 +140,14 @@ RECURRENCE_UNITS = ("daily", "weekly", "monthly", "yearly")
 
 def add_item(title, details="", category="task", priority=3, due_at=None, remind_at=None,
              recurrence=None, recurrence_until=None, reminder_text=None, progress_target=None,
-             _con=None) -> int:
+             recurrence_interval=None, _con=None) -> int:
     """remind_at is one ISO datetime, or several separated by ' | ' (e.g. night-before
     + day-of). Each becomes a one-shot row in `reminders` — a scheduled ping fires once
     and does not itself start a nag chain (see due_nags / due_scheduled_reminders).
+
+    recurrence_interval: how many recurrence units between occurrences (e.g.
+    recurrence='weekly' + recurrence_interval=2 = every other week/biweekly).
+    Defaults to 1 (every single cycle) — omit unless the owner asked for a gap.
 
     progress_target: set this to make the item a numeric daily-goal tracker (pushup
     counts, etc.) — progress_current always starts at 0, regardless of how far along
@@ -155,6 +162,8 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
         # an unrecognized unit must fail loudly, not silently store a value
         # _advance_date can't roll forward (which used to freeze due_at forever)
         raise ValueError(f"unsupported recurrence {recurrence!r} — must be one of {RECURRENCE_UNITS}")
+    if recurrence_interval is not None and (not isinstance(recurrence_interval, int) or recurrence_interval < 1):
+        raise ValueError(f"recurrence_interval must be a positive integer, got {recurrence_interval!r}")
     if due_at and not remind_at:
         remind_at = due_at
     remind_times = [t.strip() for t in remind_at.split("|")] if remind_at else []
@@ -171,10 +180,12 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
     def _insert(con):
         cur = con.execute(
             "INSERT INTO items (title, details, category, priority, due_at, created_at, recurrence,"
-            " remind_lead_seconds, recurrence_until, reminder_text, progress_current, progress_target)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " remind_lead_seconds, recurrence_until, reminder_text, progress_current, progress_target,"
+            " recurrence_interval)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (title, details, category, int(priority), due_at, now_iso(), recurrence,
-             lead, recurrence_until, reminder_text, progress_current, progress_target),
+             lead, recurrence_until, reminder_text, progress_current, progress_target,
+             recurrence_interval),
         )
         item_id = cur.lastrowid
         for t in remind_times:
@@ -187,22 +198,24 @@ def add_item(title, details="", category="task", priority=3, due_at=None, remind
         return _insert(con)
 
 
-def _advance_date(dt: datetime, unit: str) -> datetime:
-    """Rolls a datetime forward one recurrence cycle, keeping time-of-day and
-    clamping to the last valid day of the target month (e.g. Jan 31 -> Feb 28)."""
+def _advance_date(dt: datetime, unit: str, interval: int = 1) -> datetime:
+    """Rolls a datetime forward `interval` recurrence cycles (default 1 — every
+    single cycle; 2 = every other, e.g. weekly+2 = biweekly), keeping time-of-day
+    and clamping to the last valid day of the target month (e.g. Jan 31 -> Feb 28)."""
+    interval = interval or 1
     if unit == "daily":
-        return dt + timedelta(days=1)
+        return dt + timedelta(days=interval)
     if unit == "weekly":
-        return dt + timedelta(weeks=1)
+        return dt + timedelta(weeks=interval)
     if unit == "monthly":
-        month = dt.month + 1
+        month = dt.month + interval
         year = dt.year + (month - 1) // 12
         month = (month - 1) % 12 + 1
         day = min(dt.day, calendar.monthrange(year, month)[1])
         return dt.replace(year=year, month=month, day=day)
     if unit == "yearly":
         day = 28 if (dt.month == 2 and dt.day == 29) else dt.day
-        return dt.replace(year=dt.year + 1, day=day)
+        return dt.replace(year=dt.year + interval, day=day)
     return dt
 
 
@@ -218,12 +231,17 @@ def update_item(item_id, **fields):
     # a daily pushup target from 100 to 150) is a legitimate one-time config
     # change and stays allowed.
     allowed = {"title", "details", "category", "priority", "due_at", "status", "next_remind_at",
-               "remind_count", "recurrence", "recurrence_until", "reminder_text", "progress_target"}
+               "remind_count", "recurrence", "recurrence_until", "reminder_text", "progress_target",
+               "recurrence_interval"}
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
         return
     if fields.get("recurrence") and fields["recurrence"] not in RECURRENCE_UNITS:
         raise ValueError(f"unsupported recurrence {fields['recurrence']!r} — must be one of {RECURRENCE_UNITS}")
+    if fields.get("recurrence_interval") is not None:
+        iv = fields["recurrence_interval"]
+        if not isinstance(iv, int) or iv < 1:
+            raise ValueError(f"recurrence_interval must be a positive integer, got {iv!r}")
     sets = ", ".join(f"{k}=?" for k in fields)
     with _c() as con:
         con.execute(f"UPDATE items SET {sets} WHERE id=?", (*fields.values(), item_id))
@@ -256,7 +274,8 @@ def complete_item(item_id):
             if lead is None:  # pre-migration row: fall back to the live reminder, if sane
                 remind = parse_dt(item["next_remind_at"])
                 lead = int((due - remind).total_seconds()) if remind and remind <= due else 0
-            new_due = _advance_date(due, item["recurrence"])
+            interval = item["recurrence_interval"] if "recurrence_interval" in item.keys() and item["recurrence_interval"] else 1
+            new_due = _advance_date(due, item["recurrence"], interval)
             until = parse_dt(item["recurrence_until"]) if "recurrence_until" in item.keys() else None
             if until and new_due.date() > until.date():
                 return  # series has ended — don't spawn past the requested end date
@@ -272,7 +291,7 @@ def complete_item(item_id):
             # reminder is genuinely in the future.
             now = datetime.now(TZ)
             while new_remind <= now:
-                new_due = _advance_date(new_due, item["recurrence"])
+                new_due = _advance_date(new_due, item["recurrence"], interval)
                 new_remind = new_due - timedelta(seconds=lead)
                 if until and new_due.date() > until.date():
                     return
@@ -284,6 +303,7 @@ def complete_item(item_id):
                 due_at=new_due.isoformat(timespec="seconds"),
                 remind_at=new_remind.isoformat(timespec="seconds"),
                 recurrence=item["recurrence"],
+                recurrence_interval=interval,
                 recurrence_until=item["recurrence_until"] if "recurrence_until" in item.keys() else None,
                 reminder_text=item["reminder_text"] if "reminder_text" in item.keys() else None,
                 # same daily target carries forward; progress_current always
@@ -489,9 +509,10 @@ def roll_forward_recurring(now: datetime) -> list:
         if not due or due >= today_start:
             continue  # today's (or a future) occurrence — still live, leave it
         until = parse_dt(it["recurrence_until"]) if "recurrence_until" in it.keys() else None
+        interval = it["recurrence_interval"] if "recurrence_interval" in it.keys() and it["recurrence_interval"] else 1
         new_due = due
         while new_due < today_start:
-            new_due = _advance_date(new_due, it["recurrence"])
+            new_due = _advance_date(new_due, it["recurrence"], interval)
         if until and new_due.date() > until.date():
             # the series is over — retire the stragger rather than rolling it
             # past the end date the owner asked for

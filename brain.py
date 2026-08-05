@@ -139,7 +139,9 @@ never referenced at all, apparently pattern-matched from an unrelated "car"-adja
 before. complete_item/update_item must ONLY ever target an item {_S} explicitly named or unambiguously referred to \
 in THIS message — never an item that merely shares a word, a category, or general topic with something mentioned \
 recently; when nothing in {_P} current message points at a specific item, don't touch any item at all. Use \
-recurrence (weekly/monthly/yearly) for repeating things — the next occurrence spawns itself on check-off.
+recurrence (daily/weekly/monthly/yearly) for repeating things — the next occurrence spawns itself on check-off. \
+For a gap between occurrences (every other week, every 3 days), set recurrence_interval too — e.g. weekly + \
+recurrence_interval=2 for biweekly/every-other-week. Omit recurrence_interval (defaults to 1) for every single cycle.
 
 STATUS UPDATES: If {_S} mentions progress on a tracked item without confirming it's finished ("headed to X", \
 "about to start X") do NOT complete_item on a guess — but never reply with a content-free pleasantry either. Say \
@@ -261,6 +263,11 @@ def _tools() -> list:
                         "enum": ["daily", "weekly", "monthly", "yearly"],
                         "description": f"Set only if {_S} describes something that repeats on its own cycle (a daily habit = daily, rent on the 1st = monthly, car registration every July = yearly, trash night = weekly). Requires due_at. When {_S} checks it off, the next occurrence is created automatically.",
                     },
+                    "recurrence_interval": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": f"Gap between occurrences, in units of `recurrence` — e.g. recurrence='weekly' + recurrence_interval=2 = every other week/biweekly, recurrence='daily' + recurrence_interval=3 = every 3 days. Omit (defaults to 1) for every single cycle. Only meaningful with recurrence set.",
+                    },
                     "recurrence_until": {
                         "type": "string",
                         "description": f"ISO date the recurrence series should stop (e.g. {_S} says 'this summer' -> pick a sensible end like late September). Only meaningful with recurrence set; omit for an open-ended series.",
@@ -320,6 +327,11 @@ def _tools() -> list:
                         "type": "string",
                         "enum": ["none", "daily", "weekly", "monthly", "yearly"],
                         "description": "Set to start/change a repeat cycle, or 'none' to stop it repeating.",
+                    },
+                    "recurrence_interval": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Gap between occurrences, in units of `recurrence` — e.g. recurrence='weekly' + recurrence_interval=2 = every other week/biweekly. Omit (defaults to 1) for every single cycle.",
                     },
                     "recurrence_until": {
                         "type": "string",
@@ -502,7 +514,12 @@ def _describe_update(inp: dict) -> str:
         bits.append(f'renamed to "{inp["title"]}"')
     if inp.get("recurrence"):
         r = inp["recurrence"]
-        bits.append("no longer repeating" if r == "none" else f"repeats {r}")
+        if r == "none":
+            bits.append("no longer repeating")
+        else:
+            iv = inp.get("recurrence_interval")
+            unit_noun = {"daily": "day", "weekly": "week", "monthly": "month", "yearly": "year"}.get(r, r)
+            bits.append(f"repeats every {iv} {unit_noun}s" if iv and iv > 1 else f"repeats {r}")
     if inp.get("status") == "dropped":
         bits.append("dropped")
     if inp.get("priority"):
@@ -523,6 +540,7 @@ def _run_tool(name: str, inp: dict) -> ToolResult:
                 due_at=inp.get("due_at"),
                 remind_at=inp.get("remind_at"),
                 recurrence=inp.get("recurrence"),
+                recurrence_interval=inp.get("recurrence_interval"),
                 recurrence_until=inp.get("recurrence_until"),
                 reminder_text=inp.get("reminder_text"),
                 progress_target=inp.get("progress_target"),
@@ -556,6 +574,7 @@ def _run_tool(name: str, inp: dict) -> ToolResult:
             remind_at = fields.pop("remind_at", None)
             if fields.get("recurrence") == "none":
                 fields["recurrence"] = None
+                fields["recurrence_interval"] = None
             if fields.get("recurrence_until") == "":
                 fields["recurrence_until"] = None
             if fields:
