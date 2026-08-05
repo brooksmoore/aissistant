@@ -11,6 +11,7 @@ through the exact channel that might be the thing that's broken would defeat
 the purpose. Zero model calls, zero API cost, does not import
 bot.py/brain.py/scheduler.py — nothing in this file can be affected by
 whatever is wrong with the thing it's checking on."""
+import os
 import re
 import subprocess
 from datetime import datetime, timedelta
@@ -18,6 +19,12 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 INSTANCES = ("jarvis", "penny")
+
+# Default ON — this file exists to catch silent failures nothing else will report, unlike
+# umbrella's liveness check it has no fallback status file. Set AISSISTANT_HEARTBEAT_NOTIFY=0
+# to mute deliberately (e.g. while a known issue like a lapsed Google token is being fixed).
+def _notify_enabled() -> bool:
+    return os.environ.get("AISSISTANT_HEARTBEAT_NOTIFY", "1") not in ("0", "false", "no")
 LOG_STALE_MINUTES = 15       # zero log activity in this window -> process looks hung
 ERROR_WINDOW_MINUTES = 10    # look at this recent a slice of the log for network errors
 ERROR_THRESHOLD = 5          # this many NetworkError/TimedOut lines in the window -> stuck poller
@@ -127,12 +134,15 @@ def main():
             last = state.get(key)
             if last and now - datetime.fromisoformat(last) < timedelta(minutes=ALERT_COOLDOWN_MINUTES):
                 continue  # already alerted for this ongoing incident within the cooldown
-            try:
-                _notify("aissistant heartbeat", alert)
-            except Exception:
-                # a failed notification for one instance must not stop the
-                # other instance's check or the state save at the end
-                print(f"heartbeat: notify failed for {instance}: {alert}")
+            if _notify_enabled():
+                try:
+                    _notify("aissistant heartbeat", alert)
+                except Exception:
+                    # a failed notification for one instance must not stop the
+                    # other instance's check or the state save at the end
+                    print(f"heartbeat: notify failed for {instance}: {alert}")
+            else:
+                print(f"heartbeat: notify muted (AISSISTANT_HEARTBEAT_NOTIFY=0): {alert}")
             state[key] = now.isoformat()
         else:
             state.pop(key, None)  # healthy again -> the next real incident alerts fresh
